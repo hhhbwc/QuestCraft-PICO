@@ -1,0 +1,34 @@
+diff --git a/QCXR-XR-Wrapper/Assets/Scripts/InstanceButton.cs b/QCXR-XR-Wrapper/Assets/Scripts/InstanceButton.cs
+index 3843485..97876bd 100644
+--- a/QCXR-XR-Wrapper/Assets/Scripts/InstanceButton.cs
++++ b/QCXR-XR-Wrapper/Assets/Scripts/InstanceButton.cs
+@@ -26,6 +26,7 @@ public class InstanceButton : MonoBehaviour
+             return;
+         currInstName = JNIStorage.instance.instancesDropdown.options[JNIStorage.instance.instancesDropdown.value].text;
+ 
++
+         if (prelaunchFailed)
+         {
+             prelaunchFailed = false;
+@@ -94,8 +95,9 @@ public class InstanceButton : MonoBehaviour
+                 preparedInstance = instance;
+                 launchPrepared = true;
+             }
+-            catch
++            catch (System.Exception e)
+             {
++                Debug.LogException(e);
+                 prelaunchFailed = true;
+             }
+             finally
+@@ -116,6 +118,10 @@ public class InstanceButton : MonoBehaviour
+                 JNIStorage.apiClass.CallStatic("launchInstance", JNIStorage.activity, JNIStorage.accountObj,
+                     instance.raw);
+             }
++            catch (System.Exception e)
++            {
++                Debug.LogException(e);
++            }
+             finally
+             {
+                 AndroidJNI.DetachCurrentThread();

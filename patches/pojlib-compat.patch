@@ -1,0 +1,176 @@
+diff --git a/Pojlib/src/main/assets/mods.json b/Pojlib/src/main/assets/mods.json
+index 1bf3e88..a0d69ac 100644
+--- a/Pojlib/src/main/assets/mods.json
++++ b/Pojlib/src/main/assets/mods.json
+@@ -1,5 +1,32 @@
+ {
+   "versions": [
++    {
++      "name": "26.3",
++      "coreMods": [
++        {
++          "slug": "Vivecraft",
++          "version": "26.3-1.3.17-qc-openxr",
++          "download_link": "asset://mods/vivecraft-26.3-1.3.17-quest.bin"
++        },
++        {
++          "slug": "Fabric-API",
++          "version": "0.165.0+26.3",
++          "download_link": "https://cdn.modrinth.com/data/P7dR8mSH/versions/EQKgpeKu/fabric-api-0.165.0%2B26.3.jar"
++        }
++      ],
++      "defaultMods": [
++        {
++          "slug": "Sodium",
++          "version": "mc26.3-0.9.3-beta.1-fabric",
++          "download_link": "https://cdn.modrinth.com/data/AANobbMI/versions/g6ju16VJ/sodium-fabric-0.9.3-beta.1%2Bmc26.3.jar"
++        },
++        {
++          "slug": "Lithium",
++          "version": "mc26.3-0.26.2-fabric",
++          "download_link": "https://cdn.modrinth.com/data/gvQqBUqZ/versions/xS0Q8LSi/lithium-fabric-0.26.2%2Bmc26.3.jar"
++        }
++      ]
++    },
+     {
+       "name": "26.2",
+       "coreMods": [
+diff --git a/Pojlib/src/main/assets/supportedVersions.json b/Pojlib/src/main/assets/supportedVersions.json
+index e29fc10..422124e 100644
+--- a/Pojlib/src/main/assets/supportedVersions.json
++++ b/Pojlib/src/main/assets/supportedVersions.json
+@@ -1,5 +1,6 @@
+ {
+   "supportedVersions": [
++    "26.3",
+     "26.2",
+     "1.21.11",
+     "1.21.10",
+diff --git a/Pojlib/src/main/java/pojlib/InstanceHandler.java b/Pojlib/src/main/java/pojlib/InstanceHandler.java
+index ad24764..9d128b3 100644
+--- a/Pojlib/src/main/java/pojlib/InstanceHandler.java
++++ b/Pojlib/src/main/java/pojlib/InstanceHandler.java
+@@ -40,6 +40,8 @@ import pojlib.util.JREUtils;
+ import pojlib.util.Logger;
+ import pojlib.util.json.ModrinthIndexJson;
+ 
++import android.util.Log;
++
+ public class InstanceHandler {
+     public static final String MODS = "https://raw.githubusercontent.com/QuestCraftPlusPlus/Pojlib/refs/heads/" + Constants.GIT_BRANCH + "/mods.json";
+     public static final String DEV_MODS = "https://raw.githubusercontent.com/QuestCraftPlusPlus/Pojlib/refs/heads/" + Constants.GIT_BRANCH + "/devmods.json";
+@@ -338,12 +340,15 @@ public class InstanceHandler {
+ 
+     public static void launchInstance(Activity activity, MinecraftAccount account, MinecraftInstances.Instance instance) {
+         try {
++            Logger.getInstance().appendToLog("QuestCraft: Entering launchInstance (account=" + (account != null ? account.username : "null") + ")");
+             API.currentInstance = instance;
+             JREUtils.redirectAndPrintJRELog();
++            Logger.getInstance().appendToLog("QuestCraft: redirectAndPrintJRELog done");
+             VLoader.setAndroidInitInfo(activity);
++            Logger.getInstance().appendToLog("QuestCraft: setAndroidInitInfo done");
+             JREUtils.launchJavaVM(activity, instance.generateLaunchArgs(account), instance);
+         } catch (Throwable e) {
+-            e.printStackTrace();
++            Logger.getInstance().appendToLog("ERROR: Failed to launch instance!\n" + Log.getStackTraceString(e));
+         }
+     }
+ }
+diff --git a/Pojlib/src/main/java/pojlib/util/JREUtils.java b/Pojlib/src/main/java/pojlib/util/JREUtils.java
+index 5550f08..f61c898 100644
+--- a/Pojlib/src/main/java/pojlib/util/JREUtils.java
++++ b/Pojlib/src/main/java/pojlib/util/JREUtils.java
+@@ -63,7 +63,22 @@ public class JREUtils {
+         return libName;
+     }
+ 
++    /** The APK's own freetype (Bionic, 2.13+) is the only one LWJGL 3.3.6 can use;
++     *  the JRE bundles an old 2.9 build under the same SONAME. */
++    private static String preferredFreetype() {
++        if (sNativeLibDir != null) {
++            File appLib = new File(sNativeLibDir, "libfreetype.so");
++            if (appLib.isFile()) {
++                return appLib.getAbsolutePath();
++            }
++        }
++        return findInLdLibPath("libfreetype.so");
++    }
++
+     public static boolean initJavaRuntime() {
++        // Load our freetype first and RTLD_GLOBAL: one copy in the process, so
++        // libfontmanager binds to it too instead of pulling in the old 2.9 build.
++        boolean freetypeLoaded = dlopen(preferredFreetype());
+         boolean requiredLibrariesLoaded =
+                 dlopen(findInLdLibPath("libjli.so")) &
+                 dlopen(findInLdLibPath("server/libjvm.so")) &
+@@ -73,9 +88,11 @@ public class JREUtils {
+                 dlopen(findInLdLibPath("libnio.so")) &
+                 dlopen(findInLdLibPath("libawt.so")) &
+                 dlopen(findInLdLibPath("libawt_headless.so")) &
+-                dlopen(findInLdLibPath("libfreetype.so")) &
++                freetypeLoaded &
+                 dlopen(findInLdLibPath("libfontmanager.so"));
+ 
++        Logger.getInstance().appendToLog("QuestCraft: initJavaRuntime dlopen chain done (freetypeLoaded=" + freetypeLoaded + ")");
++
+         String dlerr = dlerror();
+         if(!requiredLibrariesLoaded && dlerr != null && dlerr.contains(runtimeDir)) {
+             Logger.getInstance().appendToLog("ERROR! Could not dlopen libraries! " + dlerr);
+@@ -120,6 +137,8 @@ public class JREUtils {
+     }
+ 
+     public static void redirectAndPrintJRELog() {
++        Logger.getInstance().appendToLog("QuestCraft: redirectAndPrintJRELog starting log bridge...");
++        try {
+         Log.v("jrelog","Log starts here");
+         JREUtils.logToLogger(Logger.getInstance());
+         new Thread(new Runnable(){
+@@ -159,6 +178,9 @@ public class JREUtils {
+             }
+         }).start();
+         Log.i("jrelog-logcat","Logcat thread started");
++        } catch (Throwable t) {
++            Logger.getInstance().appendToLog("ERROR in redirectAndPrintJRELog: " + Log.getStackTraceString(t));
++        }
+     }
+ 
+     public static void relocateLibPath(final Context ctx, MinecraftInstances.Instance instance) {
+@@ -242,6 +264,7 @@ public class JREUtils {
+     }
+ 
+     public static int launchJavaVM(final Activity activity, final List<String> JVMArgs, MinecraftInstances.Instance instance) throws Throwable {
++        Logger.getInstance().appendToLog("QuestCraft: launchJavaVM entered, building JVM args...");
+         final String graphicsLib = loadGraphicsLibrary();
+         List<String> userArgs = getJavaArgs(activity, instance);
+         int javaMajor = getInstalledJavaMajor(activity);
+@@ -303,7 +326,17 @@ public class JREUtils {
+         Thread jvmThread = new Thread(() -> {
+             int exitCode = VMLauncher.launchJVM(launchArgs);
+             Logger.getInstance().appendToLog("Java Exit code: " + exitCode);
++            // Unity handed the XR session over to the game and stopped its own loader;
++            // once the JVM is gone nothing drives the headset any more, so the launcher
++            // would sit on a dead surface. Restart it so the user lands back in the UI.
++            try {
++                Logger.getInstance().appendToLog("QuestCraft: game exited, restarting launcher...");
++                org.lwjgl.glfw.CallbackBridge.restartUnitySession(activity);
++            } catch (Throwable t) {
++                Logger.getInstance().appendToLog("ERROR restarting launcher: " + Log.getStackTraceString(t));
++            }
+         }, "QuestCraft-JVM");
++        Logger.getInstance().appendToLog("QuestCraft: Starting JVM thread (QuestCraft-JVM)...");
+         jvmThread.start();
+         return 0;
+     }
+diff --git a/Pojlib/src/main/java/pojlib/util/json/MinecraftInstances.java b/Pojlib/src/main/java/pojlib/util/json/MinecraftInstances.java
+index b5b318a..85fdddf 100644
+--- a/Pojlib/src/main/java/pojlib/util/json/MinecraftInstances.java
++++ b/Pojlib/src/main/java/pojlib/util/json/MinecraftInstances.java
+@@ -93,7 +93,7 @@ public class MinecraftInstances {
+             allArgs.add(classpath);
+             allArgs.add(mainClass);
+             allArgs.addAll(Arrays.asList(mcArgs));
+-            if ("26.2".equals(versionName)) {
++            if (versionName != null && versionName.startsWith("26.")) {
+                 allArgs.add("--graphicsBackend");
+                 allArgs.add("vulkan");
+             }

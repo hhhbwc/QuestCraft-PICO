@@ -1,0 +1,9 @@
+*.apk
+*.aar
+*.so
+*.jar
+*.bin
+*.zip
+!patches/**
+logs/
+build/
