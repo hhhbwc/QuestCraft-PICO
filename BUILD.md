@@ -19,17 +19,19 @@ git clone https://github.com/QuestCraftPlusPlus/QCXR-XR-Wrapper.git
 git clone -b Multiloader-26.3 https://github.com/Vivecraft/VivecraftMod.git vc-26.3
 ```
 
-打补丁（以 Pojlib 的 `QuestCraft-6.0.1` 分支为准）：
+打补丁（补丁前缀是 `a/Pojlib/...`、`a/QCXR-XR-Wrapper/...`，在各自仓库根目录用 `-p2`）：
 
 ```bash
 cd Pojlib
-git apply ../patches/pojlib-compat.patch
-git apply ../patches/pojlib-modcompat.patch
+git apply -p2 ../patches/pojlib-compat.patch
+git apply -p2 ../patches/pojlib-modcompat.patch
 cp ../src/pojlib/ModCompat.java src/main/java/pojlib/util/
 
 cd ../QCXR-XR-Wrapper
-git apply ../patches/wrapper-compat.patch
+git apply -p2 ../patches/wrapper-compat.patch
 ```
+
+> 如果你的目录布局是"一个父目录里同时有 `Pojlib/` 和 `QCXR-XR-Wrapper/`"，则在父目录用 `-p1`。
 
 ## 2. freetype（唯一需要自己准备的原生库）
 
