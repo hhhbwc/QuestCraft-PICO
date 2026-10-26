@@ -21,6 +21,7 @@ import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.nio.file.StandardCopyOption;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
 import java.util.StringJoiner;
@@ -44,6 +45,42 @@ public class Installer {
     private static final String FABRIC_LOADER_26_2_JAR = Constants.USER_HOME +
         "/libraries/net/fabricmc/fabric-loader/" + FABRIC_LOADER_26_2 +
         "/fabric-loader-" + FABRIC_LOADER_26_2 + ".jar";
+
+    /**
+     * 26.3-only per-instance LWJGL 3.4.1 runtime (Java jars only; the Bionic
+     * natives ship in the APK's jniLibs under *341 names because the game JVM
+     * may only dlopen files that live in nativeLibraryDir).
+     * 26.2 and older keep the merged GLFW 3.3.x classes; these assets are never
+     * installed for them.
+     */
+    private static final String LWJGL3_SDL_ASSET_DIR = "components/lwjgl3/3.4.1";
+    private static final String LWJGL3_SDL_VERSION = "3.4.1";
+    private static final String LWJGL3_SDL_LEGACY_DIR = "lwjgl3/3.4.3";
+    // The overlay must be the first entry so its patched SDLInit/SDLMouse and the
+    // bundled-library name mapper shadow/load before the stock 3.4.1 classes.
+    private static final String[] LWJGL3_SDL_JARS = {
+        "lwjgl-sdl-overlay-3.4.1.jar",
+        "lwjgl-3.4.1.jar",
+        "lwjgl-opengl-3.4.1.jar",
+        "lwjgl-openal-3.4.1.jar",
+        "lwjgl-stb-3.4.1.jar",
+        "lwjgl-freetype-3.4.1.jar",
+        "lwjgl-shaderc-3.4.1.jar",
+        "lwjgl-spvc-3.4.1.jar",
+        "lwjgl-vma-3.4.1.jar",
+        "lwjgl-sdl-3.4.1.jar",
+        "lwjgl-vulkan-3.4.1.jar"
+    };
+
+    /**
+     * True when the instance uses the LWJGL 3.4.1 + SDL stack. Exact match for now;
+     * extend here when a later 26.x ships with SDL too. Everything SDL-related in
+     * Installer/JREUtils/UnityPlayerActivity is gated on this, so 26.2 and older
+     * keep their GLFW/LWJGL 3.3.x behavior untouched.
+     */
+    public static boolean isSdlVersion(String versionName) {
+        return "26.3".equals(versionName);
+    }
 
     public static void installJVM(Activity activity, boolean force) {
         installJVM(activity, force, DEFAULT_JAVA_MAJOR);
@@ -130,9 +167,9 @@ public class Installer {
                     if (i == 4)
                         throw new RuntimeException("Client download failed after 5 retries");
 
-                    if (!clientFile.exists()) {
-                        DownloadUtils.downloadFile(minecraftVersionInfo.downloads.client.url, clientFile);
-                    } else if (DownloadUtils.compareSHA1(clientFile, minecraftVersionInfo.downloads.client.sha1)) {
+                    // Re-download when missing OR mismatched (the previous check
+                    // re-downloaded the valid file and then kept a corrupt one).
+                    if (!clientFile.exists() || !DownloadUtils.compareSHA1(clientFile, minecraftVersionInfo.downloads.client.sha1)) {
                         clientFile.delete();
                         DownloadUtils.downloadFile(minecraftVersionInfo.downloads.client.url, clientFile);
                     }
@@ -158,11 +195,16 @@ public class Installer {
             Logger.getInstance().appendToLog("Checking Libraries for: " + versionInfo.id);
             StringJoiner classpath = new StringJoiner(File.pathSeparator);
             classpath.add(OSHI_ANDROID_SHIM);
+            // LWJGL always comes from our own runtime: the merged 3.3.x GLFW classes
+            // for 26.2 and older, the per-instance 3.4.1 jars for 26.3. Letting the
+            // version JSON download its lwjgl jars would put 3.4.3 classes behind ours.
+            final boolean sdlVersion = isSdlVersion(versionInfo.id);
 
             for (VersionInfo.Library library : versionInfo.libraries) {
                 if (library.name.contains("lwjgl") || (library.name.contains("org.ow2.asm")) & !versionInfo.id.contains("fabric")) {
                     continue;
                 }
+                File sha1CacheFile = null;
                 for (int i = 0; i < 5; i++) {
                     if (i == 4)
                         throw new RuntimeException(String.format("Library download of %s failed after 5 retries", library.name));
@@ -175,6 +217,20 @@ public class Installer {
                         if (library.downloads == null) {
                             String path = parseLibraryNameToPath(library.name);
                             libraryFile = new File(gameDir + "/libraries/", path);
+                            // Skip the .sha1 network round-trip for libraries that were
+                            // already verified on a previous launch: the cached hash is only
+                            // trusted if the local file actually hashes to it, so a changed
+                            // or corrupted jar still falls through to the download path.
+                            File sha1Cache = new File(gameDir + "/libraries/", path + ".qcsha1");
+                            if (libraryFile.isFile() && sha1Cache.isFile() && sha1Cache.length() == 40) {
+                                String cachedSha1 = FileUtils.readFileToString(sha1Cache, StandardCharsets.UTF_8).trim();
+                                if (DownloadUtils.compareSHA1(libraryFile, cachedSha1)) {
+                                    classpath.add(libraryFile.getAbsolutePath());
+                                    break;
+                                }
+                                sha1Cache.delete();
+                            }
+                            sha1CacheFile = sha1Cache;
                             sha1 = APIHandler.getRaw(library.url + path + ".sha1");
                             if (!libraryFile.exists()) {
                                 Logger.getInstance().appendToLog("Downloading: " + library.name);
@@ -190,6 +246,13 @@ public class Installer {
                             }
                         }
                         if (DownloadUtils.compareSHA1(libraryFile, sha1)) {
+                            if (sha1CacheFile != null && sha1 != null) {
+                                try {
+                                    FileUtils.writeStringToFile(sha1CacheFile, sha1, StandardCharsets.UTF_8);
+                                } catch (IOException e) {
+                                    e.printStackTrace();
+                                }
+                            }
                             classpath.add(libraryFile.getAbsolutePath());
                             break;
                         }
@@ -199,8 +262,11 @@ public class Installer {
                 }
             }
 
-            // Add our GLFW
-            classpath.add(Constants.USER_HOME + "/lwjgl3/lwjgl-glfw-classes.jar");
+            // Add our GLFW (26.2 and older only; 26.3 gets the per-instance 3.4.1 jars
+            // via ensureSdlClasspath() instead)
+            if (!sdlVersion) {
+                classpath.add(Constants.USER_HOME + "/lwjgl3/lwjgl-glfw-classes.jar");
+            }
             // DNS SRV Resolver fix
             classpath.add(Constants.USER_HOME + "/hacks/ResConfHack.jar");
 
@@ -214,6 +280,15 @@ public class Installer {
     public static CompletableFuture<String> installAssets(VersionInfo minecraftVersionInfo, String gameDir) throws IOException {
         return CompletableFuture.supplyAsync(() -> {
             Logger.getInstance().appendToLog("Checking assets");
+            // Fast path: once the index json exists, every asset was already
+            // materialized by a previous launch (the sweep below only checks
+            // existence for present files), so skip the index download and the
+            // thousands of queued existence checks entirely.
+            File assetIndexJson = new File(gameDir + "/assets/indexes/" + minecraftVersionInfo.assets + ".json");
+            if (assetIndexJson.isFile()) {
+                Logger.getInstance().appendToLog("Assets already present");
+                return new File(gameDir + "/assets").getAbsolutePath();
+            }
             JsonObject assets = APIHandler.getFullUrl(minecraftVersionInfo.assetIndex.url, JsonObject.class);
 
             for (Map.Entry<String, JsonElement> entry : assets.getAsJsonObject("objects").entrySet()) {
@@ -235,14 +310,7 @@ public class Installer {
                 Logger.getInstance().appendToLog("Download thread interrupted" + e.getMessage());
             }
 
-            File indexJson = new File(gameDir + "/assets/indexes/" + minecraftVersionInfo.assets + ".json");
-            if (!indexJson.exists()) {
-                try {
-                    DownloadUtils.downloadFile(minecraftVersionInfo.assetIndex.url, indexJson);
-                } catch (IOException e) {
-                    e.printStackTrace();
-                }
-            }
+
 
             return new File(gameDir + "/assets").getAbsolutePath();
         });
@@ -250,15 +318,18 @@ public class Installer {
 
     public static void moveLocalAssets(Activity activity, MinecraftInstances.Instance instance) throws IOException {
         try {
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/sodium-options.json"), FileUtil.loadFromAssetToByte(activity, "sodium-options.json"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/sodium-mixins.properties"), FileUtil.loadFromAssetToByte(activity, "sodium-mixins.properties"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/smoothboot.json"), FileUtil.loadFromAssetToByte(activity, "smoothboot.json"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/immediatelyfast.json"), FileUtil.loadFromAssetToByte(activity, "immediatelyfast.json"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/moreculling.toml"), FileUtil.loadFromAssetToByte(activity,"moreculling.toml"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/modernfix-mixins.properties"), FileUtil.loadFromAssetToByte(activity,"modernfix-mixins.properties"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/options.txt"), FileUtil.loadFromAssetToByte(activity, "options.txt"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/servers.dat"), FileUtil.loadFromAssetToByte(activity, "servers.dat"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/vivecraft-client-config.json"), FileUtil.loadFromAssetToByte(activity, "vivecraft-client-config.json"));
+            // Configs the player edits in-game are seeded once; re-installing or
+            // repairing an instance must not reset them.
+            copyAssetIfMissing(activity, "sodium-options.json", new File(instance.gameDir, "config/sodium-options.json"));
+            copyAssetIfMissing(activity, "sodium-mixins.properties", new File(instance.gameDir, "config/sodium-mixins.properties"));
+            copyAssetIfMissing(activity, "smoothboot.json", new File(instance.gameDir, "config/smoothboot.json"));
+            copyAssetIfMissing(activity, "immediatelyfast.json", new File(instance.gameDir, "config/immediatelyfast.json"));
+            copyAssetIfMissing(activity, "moreculling.toml", new File(instance.gameDir, "config/moreculling.toml"));
+            copyAssetIfMissing(activity, "modernfix-mixins.properties", new File(instance.gameDir, "config/modernfix-mixins.properties"));
+            copyAssetIfMissing(activity, "options.txt", new File(instance.gameDir, "options.txt"));
+            copyAssetIfMissing(activity, "servers.dat", new File(instance.gameDir, "servers.dat"));
+            copyAssetIfMissing(activity, "vivecraft-client-config.json", new File(instance.gameDir, "config/vivecraft-client-config.json"));
+
             FileUtils.writeByteArrayToFile(new File(Constants.USER_HOME + "/hacks/ResConfHack.jar"), FileUtil.loadFromAssetToByte(activity, "hacks/ResConfHack.jar"));
             FileUtils.writeByteArrayToFile(new File(Constants.USER_HOME + "/hacks/OshiAndroidShim.jar"), FileUtil.loadFromAssetToByte(activity, "hacks/OshiAndroidShim.jar"));
             FileUtils.writeByteArrayToFile(new File(Constants.USER_HOME + "/hacks/resolv.conf"), FileUtil.loadFromAssetToByte(activity, "hacks/resolv.conf"));
@@ -268,20 +339,114 @@ public class Installer {
     }
 
     public static void refreshLaunchCompatibilityAssets(Activity activity, MinecraftInstances.Instance instance) {
-        if(!"26.2".equals(instance.versionName)) {
-            return;
-        }
-
         try {
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/sodium-options.json"), FileUtil.loadFromAssetToByte(activity, "sodium-options.json"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/config/sodium-mixins.properties"), FileUtil.loadFromAssetToByte(activity, "sodium-mixins.properties"));
-            FileUtils.writeByteArrayToFile(new File(instance.gameDir + "/options.txt"), FileUtil.loadFromAssetToByte(activity, "options.txt"));
+            // options.txt holds the language, graphics backend and every video/audio
+            // setting; Sodium's config is edited from its own screen. Rewriting them
+            // on every launch was resetting all of that. Only seed what is missing.
+            copyAssetIfMissing(activity, "options.txt", new File(instance.gameDir, "options.txt"));
+            if ("26.2".equals(instance.versionName)) {
+                copyAssetIfMissing(activity, "sodium-options.json", new File(instance.gameDir, "config/sodium-options.json"));
+                copyAssetIfMissing(activity, "sodium-mixins.properties", new File(instance.gameDir, "config/sodium-mixins.properties"));
+            }
             FileUtils.writeByteArrayToFile(new File(Constants.USER_HOME + "/hacks/OshiAndroidShim.jar"), FileUtil.loadFromAssetToByte(activity, "hacks/OshiAndroidShim.jar"));
-            refreshFabricLoaderForCurrentLaunch(activity, instance);
-            ensureClasspathEntryFirst(instance, OSHI_ANDROID_SHIM);
         } catch (IOException e) {
             e.printStackTrace();
         }
+
+        ensureClasspathEntryFirst(instance, OSHI_ANDROID_SHIM);
+        if (isSdlVersion(instance.versionName)) {
+            // 26.3: per-instance LWJGL 3.4.1 jars + SDL overlay;
+            // the overlay and the jars are prepended to THIS instance's classpath only.
+            try {
+                installSdlLwjglRuntime(activity, instance);
+                ensureSdlClasspath(instance);
+            } catch (IOException e) {
+                Logger.getInstance().appendToLog("Failed to install LWJGL 3.4.1 SDL runtime: " + e.getMessage());
+                e.printStackTrace();
+            }
+        }
+        if ("26.2".equals(instance.versionName)) {
+            refreshFabricLoaderForCurrentLaunch(activity, instance);
+        }
+    }
+
+    /** Copies the 26.3 LWJGL 3.4.1 jars to USER_HOME/lwjgl3/3.4.1/. */
+    public static void installSdlLwjglRuntime(Activity activity, String versionName) throws IOException {
+        if (!isSdlVersion(versionName)) {
+            return;
+        }
+        File baseDir = new File(Constants.APP_FILES_DIR, "lwjgl3/" + LWJGL3_SDL_VERSION);
+        for (String jar : LWJGL3_SDL_JARS) {
+            installSdlAsset(activity, LWJGL3_SDL_ASSET_DIR + "/" + jar, new File(baseDir, jar));
+        }
+        installSdlAsset(activity, LWJGL3_SDL_ASSET_DIR + "/version", new File(baseDir, "version"));
+        // Earlier 26.3 test builds copied the natives into app-private storage. The
+        // game JVM's linker namespace refuses to dlopen those paths, so the natives
+        // now live in the APK and this directory is dead weight.
+        deleteRunsDir(new File(Constants.APP_FILES_DIR, LWJGL3_SDL_LEGACY_DIR));
+        deleteRunsDir(new File(baseDir, "natives"));
+        Logger.getInstance().appendToLog("LWJGL 3.4.1 SDL runtime installed");
+    }
+
+    private static void deleteRunsDir(File dir) {
+        if (!dir.isDirectory()) {
+            return;
+        }
+        File[] children = dir.listFiles();
+        if (children != null) {
+            for (File child : children) {
+                deleteRunsDir(child);
+            }
+        }
+        if (!dir.delete()) {
+            Logger.getInstance().appendToLog("Could not remove stale LWJGL dir: " + dir);
+        }
+    }
+
+    public static void installSdlLwjglRuntime(Activity activity, MinecraftInstances.Instance instance) throws IOException {
+        installSdlLwjglRuntime(activity, instance.versionName);
+    }
+
+    private static void installSdlAsset(Activity activity, String assetPath, File target) throws IOException {
+        byte[] bytes = FileUtil.loadFromAssetToByte(activity, assetPath);
+        if (bytes == null) {
+            // Missing natives are not fatal here: libSDL3.so lives in the APK's global
+            // jniLibs and org.lwjgl.librarypath falls back to nativeLibraryDir.
+            Logger.getInstance().appendToLog("Missing LWJGL 3.4.1 asset (skipped): " + assetPath);
+            return;
+        }
+        if (target.isFile() && Arrays.equals(bytes, Files.readAllBytes(target.toPath()))) {
+            return;
+        }
+        File parent = target.getParentFile();
+        if (parent != null) {
+            parent.mkdirs();
+        }
+        FileUtils.writeByteArrayToFile(target, bytes);
+    }
+
+    /** Prepends the 3.4.1 jars (overlay first) to this instance's classpath only. */
+    public static void ensureSdlClasspath(MinecraftInstances.Instance instance) {
+        if (!isSdlVersion(instance.versionName)) {
+            return;
+        }
+        File baseDir = new File(Constants.APP_FILES_DIR, "lwjgl3/" + LWJGL3_SDL_VERSION);
+        StringJoiner joiner = new StringJoiner(File.pathSeparator);
+        for (String jar : LWJGL3_SDL_JARS) {
+            joiner.add(new File(baseDir, jar).getAbsolutePath());
+        }
+        ensureClasspathEntriesFirst(instance, joiner.toString());
+    }
+
+    private static void copyAssetIfMissing(Activity activity, String asset, File target) throws IOException {
+        if (target.isFile() && target.length() > 0) {
+            return;
+        }
+        File parent = target.getParentFile();
+        if (parent != null) {
+            parent.mkdirs();
+        }
+        FileUtils.writeByteArrayToFile(target, FileUtil.loadFromAssetToByte(activity, asset));
     }
 
     private static void refreshFabricLoaderForCurrentLaunch(Activity activity, MinecraftInstances.Instance instance) {

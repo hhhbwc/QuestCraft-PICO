@@ -34,6 +34,9 @@ import android.widget.FrameLayout;
 import com.unity3d.player.IUnityPlayerLifecycleEvents;
 import com.unity3d.player.UnityPlayer;
 
+import org.libsdl.app.SDL;
+import org.libsdl.app.SDLActivity;
+import org.libsdl.app.SDLSurface;
 import org.lwjgl.glfw.CallbackBridge;
 
 import java.io.File;
@@ -41,6 +44,8 @@ import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Paths;
 import java.util.Objects;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.TimeUnit;
 
 import fr.spse.gamepad_remapper.RemapperManager;
 import fr.spse.gamepad_remapper.RemapperView;
@@ -48,11 +53,14 @@ import pojlib.input.AWTInputBridge;
 import pojlib.input.EfficientAndroidLWJGLKeycode;
 import pojlib.input.GrabListener;
 import pojlib.input.LwjglGlfwKeycode;
+import pojlib.input.MinecraftGLSurface;
+import pojlib.install.Installer;
 import pojlib.input.gamepad.DefaultDataProvider;
 import pojlib.input.gamepad.Gamepad;
 import pojlib.util.Constants;
 import pojlib.util.FileUtil;
 import pojlib.util.Logger;
+import pojlib.util.json.MinecraftInstances;
 import pojlib.util.download.DownloadManager;
 import pojlib.util.download.DownloadUtils;
 
@@ -62,6 +70,11 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
     private SurfaceView mMinecraftSurfaceView;
     private final Object mMinecraftSurfaceLock = new Object();
     private Surface mMinecraftSurface;
+    // --- 26.3 (SDL) surface wiring; inert for 26.2 and older ---
+    private FrameLayout mRootView;
+    private SurfaceView mSdlSurfaceView;
+    private SDLSurface mSdlSurface;
+    private boolean mSdlRuntimeInstalled = false;
     public static volatile ClipboardManager GLOBAL_CLIPBOARD;
     private Gamepad mGamepad = null;
 
@@ -93,6 +106,10 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
     // Setup activity layout
     @Override protected void onCreate(Bundle savedInstanceState) {
         Constants.initConstants(this);
+        // Test hook: adb shell am start ... --es qcxr_autolaunch 26.3
+        // Must be set before UnityPlayer starts, because C# Start() can run
+        // before onCreate returns.
+        API.autoLaunchInstance = getIntent().getStringExtra("qcxr_autolaunch");
 
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(savedInstanceState);
@@ -101,7 +118,8 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
         getIntent().putExtra("unity", cmdLine);
 
         mUnityPlayer = new UnityPlayer(this, this);
-        FrameLayout rootView = new FrameLayout(this);
+        mRootView = new FrameLayout(this);
+        FrameLayout rootView = mRootView;
         mMinecraftSurfaceView = new SurfaceView(this);
         mMinecraftSurfaceView.getHolder().setFormat(PixelFormat.RGBA_8888);
         mMinecraftSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
@@ -125,6 +143,9 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
         rootView.addView(mMinecraftSurfaceView, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
+        // 26.3 (SDL) gets a dedicated surface, created lazily in installSdlRuntime().
+        // Creating it for every version would leave an extra SurfaceView behind 26.2's
+        // Unity view, so 26.2/older never allocate it.
         rootView.addView(mUnityPlayer, new FrameLayout.LayoutParams(
                 FrameLayout.LayoutParams.MATCH_PARENT,
                 FrameLayout.LayoutParams.MATCH_PARENT));
@@ -210,6 +231,101 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
 
         Logger.getInstance().appendToLog("LWJGL installed");
         return lwjgl.getAbsolutePath();
+    }
+
+    /**
+     * Version-dispatching LWJGL install: 26.3 installs the per-instance
+     * LWJGL 3.4.1 jars from assets/components/lwjgl3/3.4.1/ (natives live in
+     * jniLibs), while 26.2 and older keep the lwjgl-glfw-classes.bin extraction.
+     */
+    public static void installLWJGL(Activity activity, String versionName) throws IOException {
+        if (Installer.isSdlVersion(versionName)) {
+            Installer.installSdlLwjglRuntime(activity, versionName);
+            return;
+        }
+        installLWJGL(activity);
+    }
+
+    /**
+     * Creates the SDL-owned SurfaceView on first 26.3 launch. Never called for 26.2
+     * and older, so their view hierarchy is byte-for-byte the previous behavior.
+     */
+    private void ensureSdlSurfaceView() {
+        if (mSdlSurfaceView != null) return;
+        mSdlSurfaceView = new SurfaceView(this);
+        mSdlSurfaceView.getHolder().setFormat(PixelFormat.RGBA_8888);
+        mSdlSurfaceView.getHolder().addCallback(new SurfaceHolder.Callback() {
+            @Override
+            public void surfaceCreated(SurfaceHolder holder) {
+                if (mSdlSurface != null) {
+                    SDLSurface.setNativeSurface(holder.getSurface());
+                }
+            }
+
+            @Override
+            public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
+                if (mSdlSurface != null) {
+                    mSdlSurface.surfaceChanged(holder, format, width, height);
+                }
+            }
+
+            @Override
+            public void surfaceDestroyed(SurfaceHolder holder) {
+                if (mSdlSurface != null) {
+                    mSdlSurface.surfaceDestroyed(holder);
+                }
+            }
+        });
+        if (mRootView != null) {
+            mRootView.addView(mSdlSurfaceView, 0, new FrameLayout.LayoutParams(
+                    FrameLayout.LayoutParams.MATCH_PARENT,
+                    FrameLayout.LayoutParams.MATCH_PARENT));
+        }
+    }
+
+    /**
+     * Installs the Dalvik-side SDL glue before launchJavaVM: binds this activity,
+     * the SDLSurface bridge and OUR dedicated surface view together. Must be called
+     * on the UI thread before the JVM thread starts; the SDL native side is brought
+     * up later by CallbackBridge.notifyLauncher (SDL.setupJNI).
+     * 26.2 and older never reach this (gated on isSdlVersion).
+     */
+    public void installSdlRuntime(MinecraftInstances.Instance instance) {
+        if (!Installer.isSdlVersion(instance.versionName)) {
+            return;
+        }
+        // Unity calls this from its own thread (not necessarily the Android UI thread).
+        // SDL.setContext/SDLSurface must be created on the UI thread, and the JVM must not
+        // start before that, so wait for the UI runnable instead of posting and racing.
+        CountDownLatch installed = new CountDownLatch(1);
+        this.runOnUiThread(() -> {
+            try {
+                if (mSdlRuntimeInstalled) return;
+                ensureSdlSurfaceView();
+                SDL.setContext(this);
+                mSdlSurface = new SDLSurface(this);
+                Surface nativeSurface = mSdlSurfaceView.getHolder().getSurface();
+                SDLActivity.externalInitialize(mSdlSurface, mRootView, nativeSurface);
+                if (nativeSurface != null && nativeSurface.isValid()) {
+                    SDLSurface.setNativeSurface(nativeSurface);
+                }
+                mSdlSurface.surfaceChanged();
+                mSdlRuntimeInstalled = true;
+                Logger.getInstance().appendToLog("QuestCraft: SDL runtime installed");
+            } catch (Throwable t) {
+                Logger.getInstance().appendToLog("QuestCraft: failed to install SDL runtime: " + t);
+            } finally {
+                installed.countDown();
+            }
+        });
+        try {
+            if (!installed.await(10, TimeUnit.SECONDS)) {
+                Logger.getInstance().appendToLog("QuestCraft: timed out waiting for SDL runtime install");
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            Logger.getInstance().appendToLog("QuestCraft: interrupted while installing SDL runtime");
+        }
     }
 
     public void reinitUnity() {
@@ -489,6 +605,11 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
     {
         super.onPause();
 
+        // 26.3: forward to SDL so the game surface/native loop pauses too.
+        // The flag is only true after the SDL glue was initialized for a 26.3 launch.
+        if (MinecraftGLSurface.sdlEnabled) {
+            SDLActivity.nativePause();
+        }
         mUnityPlayer.pause();
     }
 
@@ -497,6 +618,9 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
     {
         super.onResume();
 
+        if (MinecraftGLSurface.sdlEnabled) {
+            SDLActivity.nativeResume();
+        }
         mUnityPlayer.resume();
     }
 

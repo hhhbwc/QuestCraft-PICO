@@ -187,12 +187,16 @@ public class InstanceHandler {
                 CompletableFuture<String> minecraftClasspath = Installer.installLibraries(minecraftVersionInfo, gameDir);
                 CompletableFuture<String> modLoaderClasspath = Installer.installLibraries(finalModLoaderVersionInfo, gameDir);
                 CompletableFuture<String> assetsFuture = Installer.installAssets(minecraftVersionInfo, gameDir);
-                String lwjgl = UnityPlayerActivity.installLWJGL(activity);
+                // 26.3 uses the per-instance LWJGL 3.4.1 jars; the merged 3.3.x GLFW
+                // classes must stay off its classpath or both versions of org.lwjgl.*
+                // end up loaded in the same JVM.
+                String lwjgl = Installer.isSdlVersion(minecraftVersionInfo.id)
+                        ? null : UnityPlayerActivity.installLWJGL(activity);
 
                 CompletableFuture<Void> installFuture = CompletableFuture.allOf(clientClasspath, minecraftClasspath, modLoaderClasspath, assetsFuture);
                 installFuture.get();
 
-                instance.classpath = clientClasspath.get() + File.pathSeparator + minecraftClasspath.get() + File.pathSeparator + modLoaderClasspath.get() + File.pathSeparator + lwjgl;
+                instance.classpath = clientClasspath.get() + File.pathSeparator + minecraftClasspath.get() + File.pathSeparator + modLoaderClasspath.get() + (lwjgl != null ? File.pathSeparator + lwjgl : "");
 
                 instance.assetsDir = assetsFuture.get();
                 Installer.moveLocalAssets(activity, instance);
@@ -346,6 +350,10 @@ public class InstanceHandler {
             Logger.getInstance().appendToLog("QuestCraft: redirectAndPrintJRELog done");
             VLoader.setAndroidInitInfo(activity);
             Logger.getInstance().appendToLog("QuestCraft: setAndroidInitInfo done");
+            if (activity instanceof UnityPlayerActivity) {
+                // 26.3 only (the method gates internally); must run before the JVM thread.
+                ((UnityPlayerActivity) activity).installSdlRuntime(instance);
+            }
             JREUtils.launchJavaVM(activity, instance.generateLaunchArgs(account), instance);
         } catch (Throwable e) {
             Logger.getInstance().appendToLog("ERROR: Failed to launch instance!\n" + Log.getStackTraceString(e));

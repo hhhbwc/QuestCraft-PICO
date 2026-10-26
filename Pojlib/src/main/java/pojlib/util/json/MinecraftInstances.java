@@ -62,6 +62,10 @@ public class MinecraftInstances {
             obj.addProperty("vrHotswitchingEnabled", "false");
             obj.addProperty("seated", "false");
 
+            // The main menu must stay in front of the player; the default attaches it
+            // to the hand/world and users report it appearing behind them.
+            obj.addProperty("menuAlwaysFollowFace", "true");
+
             GsonUtils.objectToJsonFile(config.getAbsolutePath(), obj);
         } catch (Exception e) {
             Logger.getInstance().appendToLog("Failed to modify Vivecraft config");
@@ -93,10 +97,8 @@ public class MinecraftInstances {
             allArgs.add(classpath);
             allArgs.add(mainClass);
             allArgs.addAll(Arrays.asList(mcArgs));
-            if (versionName != null && versionName.startsWith("26.")) {
-                allArgs.add("--graphicsBackend");
-                allArgs.add("vulkan");
-            }
+            // The backend comes from options.txt; forcing --graphicsBackend here
+            // overrode the player's in-game choice on every launch.
             if (account.isDemoMode) {
                 allArgs.add("--demo");
             }

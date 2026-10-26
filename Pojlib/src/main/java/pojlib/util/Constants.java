@@ -27,8 +27,11 @@ public class Constants {
     public static final String MINOTAR_URL = "https://minotar.net";
     public static final String GIT_BRANCH = "QuestCraft-6.0.1";
     public static String USER_HOME;
+    /** Internal app files dir: the only writable path the JRE linker namespace accepts. */
+    public static String APP_FILES_DIR;
 
     public static void initConstants(Activity activity) {
         USER_HOME = activity.getExternalFilesDir(null).getAbsolutePath();
+        APP_FILES_DIR = activity.getFilesDir().getAbsolutePath();
     }
 }

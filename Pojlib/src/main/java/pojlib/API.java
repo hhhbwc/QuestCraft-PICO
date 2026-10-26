@@ -80,6 +80,15 @@ public class API {
     public static boolean advancedDebugger;
     public static volatile boolean gameReady = false;
     public static volatile boolean openXRHandoffReleased = false;
+    /**
+     * Test hook: instance name passed as --es qcxr_autolaunch on the activity
+     * intent. JNIStorage starts the normal Play flow when this is non-empty.
+     */
+    public static String autoLaunchInstance;
+
+    public static String getAutoLaunchInstance() {
+        return autoLaunchInstance;
+    }
 
 
     /**

@@ -1,4 +1,5 @@
 using System;
+using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Threading.Tasks;
@@ -53,8 +54,9 @@ public class JNIStorage : MonoBehaviour
 
         apiClass = new AndroidJavaClass("pojlib.API");
         instancesObj = apiClass.CallStatic<AndroidJavaObject>("loadAll");
-        configHandler.LoadConfig();
         UpdateInstances();
+        configHandler.LoadConfig();
+        StartCoroutine(AutoLaunchFromIntent());
 	    apiClass.SetStatic("model", OpenXRFeatureSystemInfo.GetHeadsetName());
         CheckConnection();
     }
@@ -96,10 +98,17 @@ public class JNIStorage : MonoBehaviour
         if (Application.platform != RuntimePlatform.Android) return;
         AndroidJavaClass jc = new AndroidJavaClass("com.unity3d.player.UnityPlayer");
         activity = jc.GetStatic<AndroidJavaObject>("currentActivity");
+        string keepName = configHandler != null && configHandler.config != null
+            ? configHandler.config.lastSelectedInstanceName
+            : null;
         uiHandler.ClearDropdowns();
         string[] supportedVersionsArray = apiClass.CallStatic<string[]>("getQCSupportedVersions", activity);
         FillSupportedVersions(supportedVersionsArray);
         uiHandler.UpdateDropdowns(true, supportedVersions);
+        if (configHandler != null && configHandler.config != null)
+        {
+            configHandler.ApplyInstanceSelection(keepName);
+        }
     }
     
     public void CheckConnection()
@@ -122,5 +131,61 @@ public class JNIStorage : MonoBehaviour
         {
             uiHandler.SetAndShowError("Fixing data permissions succeeded!");
         }
+    }
+
+    private IEnumerator AutoLaunchFromIntent()
+    {
+        string autoLaunch = null;
+        float deadline = Time.realtimeSinceStartup + 10f;
+        while (Time.realtimeSinceStartup < deadline)
+        {
+            autoLaunch = apiClass.CallStatic<string>("getAutoLaunchInstance");
+            if (!string.IsNullOrEmpty(autoLaunch)) break;
+            yield return new WaitForSeconds(0.25f);
+        }
+        if (string.IsNullOrEmpty(autoLaunch)) yield break;
+
+        Debug.Log("[AutoLaunch] requested instance: " + autoLaunch);
+        yield return AutoLaunchWhenReady(autoLaunch);
+    }
+
+    /**
+     * Test hook driven by UnityPlayerActivity --es qcxr_autolaunch <instance>.
+     * Waits for login + instance list, then runs the exact same Play path the
+     * button uses (prelaunch, Java launch, OpenXR handoff).
+     */
+    private IEnumerator AutoLaunchWhenReady(string instanceName)
+    {
+        float deadline = Time.realtimeSinceStartup + 120f;
+        while (Time.realtimeSinceStartup < deadline)
+        {
+            if (GetInstance(instanceName) != null && accountObj != null) break;
+            yield return new WaitForSeconds(1f);
+        }
+
+        if (GetInstance(instanceName) == null)
+        {
+            Debug.LogError("[AutoLaunch] instance not found: " + instanceName);
+            yield break;
+        }
+        if (accountObj == null)
+        {
+            Debug.LogError("[AutoLaunch] no account logged in");
+            yield break;
+        }
+
+        configHandler.ApplyInstanceSelection(instanceName);
+        yield return null;
+        yield return null;
+
+        InstanceButton button = FindObjectOfType<InstanceButton>();
+        if (button == null)
+        {
+            Debug.LogError("[AutoLaunch] InstanceButton missing in scene");
+            yield break;
+        }
+
+        Debug.Log("[AutoLaunch] launching " + instanceName);
+        button.LaunchCurrentInstance();
     }
 }

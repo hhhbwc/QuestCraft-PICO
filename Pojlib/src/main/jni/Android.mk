@@ -12,6 +12,14 @@ LOCAL_MODULE := openxr_loader
 LOCAL_SRC_FILES := libopenxr_loader.so
 include $(PREBUILT_SHARED_LIBRARY)
 
+# bytehook is linked as a prebuilt so that BYTEHOOK_CALL_PREV/BYTEHOOK_POP_STACK
+# resolve at link time; the packaged libbytehook.so also gets dlopen'd at runtime
+# by native_hooks/exit_hook.c (bytehook_init).
+include $(CLEAR_VARS)
+LOCAL_MODULE := bytehook
+LOCAL_SRC_FILES := libbytehook.so
+include $(PREBUILT_SHARED_LIBRARY)
+
 include $(CLEAR_VARS)
 # Link GLESv2 for test
 LOCAL_LDLIBS := -ldl -llog -landroid -lGLESv3 -lEGL
@@ -20,11 +28,18 @@ LOCAL_CFLAGS := -DXR_USE_PLATFORM_ANDROID -DXR_USE_GRAPHICS_API_OPENGL_ES -DXR_U
 LOCAL_MODULE := pojavexec
 # LOCAL_CFLAGS += -DDEBUG
 # -DGLES_TEST
+LOCAL_SHARED_LIBRARIES := bytehook
 LOCAL_SRC_FILES := \
     egl_bridge.c \
     utils.c \
     environ/environ.c \
+    native_hooks/exit_hook.c \
+    native_hooks/chmod_hook.c \
+    native_hooks/dlopen_hook.c \
+    native_hooks/sdl_hook.c \
     input_bridge_v3.c
+# SDL3 headers for the native_hooks runtime-dlopen integration
+LOCAL_C_INCLUDES := $(LOCAL_PATH)/include
 include $(BUILD_SHARED_LIBRARY)
 
 include $(CLEAR_VARS)

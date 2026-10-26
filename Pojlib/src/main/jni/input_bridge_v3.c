@@ -15,6 +15,7 @@
 #include <jni.h>
 #include <libgen.h>
 #include <stdlib.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdatomic.h>
 #include <math.h>
@@ -22,6 +23,7 @@
 #include "log.h"
 #include "utils.h"
 #include "environ/environ.h"
+#include "native_hooks/native_hooks.h"
 
 #define EVENT_TYPE_CHAR 1000
 #define EVENT_TYPE_CHAR_MODS 1001
@@ -36,6 +38,18 @@ jint (*orig_ProcessImpl_forkAndExec)(JNIEnv *env, jobject process, jint mode, jb
 
 static void registerFunctions(JNIEnv *env);
 
+// 26.3 (SDL) support:
+// - s_runtimeHasGlfw: the game JVM may run Minecraft 26.3, whose classpath has NO
+//   org.lwjgl.glfw classes at all; every GLFW-class dependent lookup below is gated on it.
+// - method_notifyLauncher: Dalvik-side CallbackBridge.notifyLauncher(I[I)Z, used both by
+//   the SDL notification native below and by the native_hooks sdl_hook.
+static bool s_runtimeHasGlfw = false;
+static jmethodID method_notifyLauncher = NULL;
+
+jmethodID pojlib_getNotifyLauncherMethod(void) {
+    return method_notifyLauncher;
+}
+
 jint JNI_OnLoad(JavaVM* vm, __attribute__((unused)) void* reserved) {
      if (pojav_environ->dalvikJavaVMPtr == NULL) {
         __android_log_print(ANDROID_LOG_INFO, "Native", "Saving DVM environ...");
@@ -47,20 +61,44 @@ jint JNI_OnLoad(JavaVM* vm, __attribute__((unused)) void* reserved) {
         pojav_environ->method_accessAndroidClipboard = (*pojav_environ->dalvikJNIEnvPtr_ANDROID)->GetStaticMethodID(pojav_environ->dalvikJNIEnvPtr_ANDROID, pojav_environ->bridgeClazz, "accessAndroidClipboard", "(ILjava/lang/String;)Ljava/lang/String;");
         pojav_environ->method_onGrabStateChanged = (*pojav_environ->dalvikJNIEnvPtr_ANDROID)->GetStaticMethodID(pojav_environ->dalvikJNIEnvPtr_ANDROID, pojav_environ->bridgeClazz, "onGrabStateChanged", "(Z)V");
         pojav_environ->method_restartUnity = (*pojav_environ->dalvikJNIEnvPtr_ANDROID)->GetStaticMethodID(pojav_environ->dalvikJNIEnvPtr_ANDROID, pojav_environ->bridgeClazz, "restartUnitySession", "(Landroid/app/Activity;)V");
+        // SDL notification path (26.3+): the Dalvik CallbackBridge carries notifyLauncher.
+        // Its absence must not break 26.2, so just log and continue without it.
+        method_notifyLauncher = (*pojav_environ->dalvikJNIEnvPtr_ANDROID)->GetStaticMethodID(pojav_environ->dalvikJNIEnvPtr_ANDROID, pojav_environ->bridgeClazz, "notifyLauncher", "(I[I)Z");
+        if (method_notifyLauncher == NULL) {
+            if ((*pojav_environ->dalvikJNIEnvPtr_ANDROID)->ExceptionCheck(pojav_environ->dalvikJNIEnvPtr_ANDROID)) {
+                (*pojav_environ->dalvikJNIEnvPtr_ANDROID)->ExceptionClear(pojav_environ->dalvikJNIEnvPtr_ANDROID);
+            }
+            __android_log_print(ANDROID_LOG_INFO, "Native", "CallbackBridge.notifyLauncher not found; SDL notify disabled");
+        }
         pojav_environ->isUseStackQueueCall = JNI_FALSE;
     } else if (pojav_environ->dalvikJavaVMPtr != vm) {
         __android_log_print(ANDROID_LOG_INFO, "Native", "Saving JVM environ...");
         pojav_environ->runtimeJavaVMPtr = vm;
         (*vm)->GetEnv(vm, (void**) &pojav_environ->runtimeJNIEnvPtr_JRE, JNI_VERSION_1_4);
-        pojav_environ->vmGlfwClass = (*pojav_environ->runtimeJNIEnvPtr_JRE)->NewGlobalRef(pojav_environ->runtimeJNIEnvPtr_JRE, (*pojav_environ->runtimeJNIEnvPtr_JRE)->FindClass(pojav_environ->runtimeJNIEnvPtr_JRE, "org/lwjgl/glfw/GLFW"));
-        pojav_environ->method_glftSetWindowAttrib = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticMethodID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "glfwSetWindowAttrib", "(JII)V");
-        pojav_environ->method_internalWindowSizeChanged = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticMethodID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "internalWindowSizeChanged", "(JII)V");
-        jfieldID field_keyDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticFieldID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "keyDownBuffer", "Ljava/nio/ByteBuffer;");
-        jobject keyDownBufferJ = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticObjectField(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, field_keyDownBuffer);
-        pojav_environ->keyDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetDirectBufferAddress(pojav_environ->runtimeJNIEnvPtr_JRE, keyDownBufferJ);
-        jfieldID field_mouseDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticFieldID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "mouseDownBuffer", "Ljava/nio/ByteBuffer;");
-        jobject mouseDownBufferJ = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticObjectField(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, field_mouseDownBuffer);
-        pojav_environ->mouseDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetDirectBufferAddress(pojav_environ->runtimeJNIEnvPtr_JRE, mouseDownBufferJ);
+        // Minecraft 26.3 uses LWJGL 3.4.3 + SDL and has NO org.lwjgl.glfw classes.
+        // Resolving GLFW unconditionally here used to fail the whole JNI_OnLoad, which
+        // took down libpojavexec/vloader for every 26.3 launch. Resolve it conditionally:
+        // 26.2 and older still get the full GLFW bridge, 26.3 skips it and talks to the
+        // launcher through the SDL glue instead.
+        jclass glfwClass = (*pojav_environ->runtimeJNIEnvPtr_JRE)->FindClass(pojav_environ->runtimeJNIEnvPtr_JRE, "org/lwjgl/glfw/GLFW");
+        if ((*pojav_environ->runtimeJNIEnvPtr_JRE)->ExceptionCheck(pojav_environ->runtimeJNIEnvPtr_JRE)) {
+            (*pojav_environ->runtimeJNIEnvPtr_JRE)->ExceptionClear(pojav_environ->runtimeJNIEnvPtr_JRE);
+            glfwClass = NULL;
+        }
+        s_runtimeHasGlfw = glfwClass != NULL;
+        if (s_runtimeHasGlfw) {
+            pojav_environ->vmGlfwClass = (*pojav_environ->runtimeJNIEnvPtr_JRE)->NewGlobalRef(pojav_environ->runtimeJNIEnvPtr_JRE, glfwClass);
+            pojav_environ->method_glftSetWindowAttrib = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticMethodID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "glfwSetWindowAttrib", "(JII)V");
+            pojav_environ->method_internalWindowSizeChanged = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticMethodID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "internalWindowSizeChanged", "(JII)V");
+            jfieldID field_keyDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticFieldID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "keyDownBuffer", "Ljava/nio/ByteBuffer;");
+            jobject keyDownBufferJ = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticObjectField(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, field_keyDownBuffer);
+            pojav_environ->keyDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetDirectBufferAddress(pojav_environ->runtimeJNIEnvPtr_JRE, keyDownBufferJ);
+            jfieldID field_mouseDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticFieldID(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, "mouseDownBuffer", "Ljava/nio/ByteBuffer;");
+            jobject mouseDownBufferJ = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetStaticObjectField(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, field_mouseDownBuffer);
+            pojav_environ->mouseDownBuffer = (*pojav_environ->runtimeJNIEnvPtr_JRE)->GetDirectBufferAddress(pojav_environ->runtimeJNIEnvPtr_JRE, mouseDownBufferJ);
+        } else {
+            __android_log_print(ANDROID_LOG_INFO, "Native", "No org.lwjgl.glfw.GLFW on the runtime classpath; skipping GLFW bridge (SDL mode)");
+        }
         hookExec();
         installLinkerBugMitigation();
         installEMUIIteratorMititgation();
@@ -97,6 +135,7 @@ ADD_CALLBACK_WWIN(WindowSize)
 #undef ADD_CALLBACK_WWIN
 
 void handleFramebufferSizeJava(long window, int w, int h) {
+    if (!s_runtimeHasGlfw) return;
     (*pojav_environ->runtimeJNIEnvPtr_JRE)->CallStaticVoidMethod(pojav_environ->runtimeJNIEnvPtr_JRE, pojav_environ->vmGlfwClass, pojav_environ->method_internalWindowSizeChanged, (long)window, w, h);
 }
 
@@ -344,13 +383,33 @@ void noncritical_set_stackqueue(__attribute__((unused)) JNIEnv *env, __attribute
     critical_set_stackqueue(use_input_stack_queue);
 }
 
+/**
+ * Attaches the current thread to the Dalvik VM only if needed.
+ * Returns true when this call performed the attach (and therefore owns the
+ * matching detach). Never detach a thread that was already attached: SDL
+ * caches JNIEnv pointers in pthread TLS, and detaching underneath it leaves
+ * dangling env pointers.
+ */
+static bool attach_dalvik(JNIEnv **out) {
+    JavaVM *vm = pojav_environ->dalvikJavaVMPtr;
+    if (vm == NULL) { *out = NULL; return false; }
+    if ((*vm)->GetEnv(vm, (void **) out, JNI_VERSION_1_4) == JNI_OK) {
+        return false;
+    }
+    if ((*vm)->AttachCurrentThread(vm, out, NULL) != JNI_OK) {
+        *out = NULL;
+        return false;
+    }
+    return true;
+}
+
 JNIEXPORT jstring JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeClipboard(JNIEnv* env, __attribute__((unused)) jclass clazz, jint action, jbyteArray copySrc) {
 #ifdef DEBUG
     LOGD("Debug: Clipboard access is going on\n", pojav_environ->isUseStackQueueCall);
 #endif
 
     JNIEnv *dalvikEnv;
-    (*pojav_environ->dalvikJavaVMPtr)->AttachCurrentThread(pojav_environ->dalvikJavaVMPtr, &dalvikEnv, NULL);
+    bool detach = attach_dalvik(&dalvikEnv);
     assert(dalvikEnv != NULL);
     assert(pojav_environ->bridgeClazz != NULL);
 
@@ -369,7 +428,7 @@ JNIEXPORT jstring JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeClipboard(JNI
         (*dalvikEnv)->DeleteLocalRef(dalvikEnv, copyDst);
         (*env)->ReleaseByteArrayElements(env, copySrc, (jbyte *)copySrcC, 0);
     }
-    (*pojav_environ->dalvikJavaVMPtr)->DetachCurrentThread(pojav_environ->dalvikJavaVMPtr);
+    if (detach) (*pojav_environ->dalvikJavaVMPtr)->DetachCurrentThread(pojav_environ->dalvikJavaVMPtr);
     return pasteDst;
 }
 
@@ -390,17 +449,255 @@ JNIEXPORT jboolean JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeSetInputRead
 JNIEXPORT void JNICALL
 Java_org_lwjgl_glfw_CallbackBridge_restartUnitySession(JNIEnv *env, jclass clazz) {
     JNIEnv *dalvikEnv;
-    (*pojav_environ->dalvikJavaVMPtr)->AttachCurrentThread(pojav_environ->dalvikJavaVMPtr, &dalvikEnv, NULL);
+    bool detach = attach_dalvik(&dalvikEnv);
     (*dalvikEnv)->CallStaticVoidMethod(dalvikEnv, pojav_environ->bridgeClazz, pojav_environ->method_restartUnity, pojav_environ->activity);
-    (*pojav_environ->dalvikJavaVMPtr)->DetachCurrentThread(pojav_environ->dalvikJavaVMPtr);
+    if (detach) (*pojav_environ->dalvikJavaVMPtr)->DetachCurrentThread(pojav_environ->dalvikJavaVMPtr);
 }
 
 JNIEXPORT void JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeSetGrabbing(__attribute__((unused)) JNIEnv* env, __attribute__((unused)) jclass clazz, jboolean grabbing) {
     JNIEnv *dalvikEnv;
-    (*pojav_environ->dalvikJavaVMPtr)->AttachCurrentThread(pojav_environ->dalvikJavaVMPtr, &dalvikEnv, NULL);
+    bool detach = attach_dalvik(&dalvikEnv);
     (*dalvikEnv)->CallStaticVoidMethod(dalvikEnv, pojav_environ->bridgeClazz, pojav_environ->method_onGrabStateChanged, grabbing);
-    (*pojav_environ->dalvikJavaVMPtr)->DetachCurrentThread(pojav_environ->dalvikJavaVMPtr);
+    if (detach) (*pojav_environ->dalvikJavaVMPtr)->DetachCurrentThread(pojav_environ->dalvikJavaVMPtr);
     pojav_environ->isGrabbing = grabbing;
+}
+
+/**
+ * SDL notification path (MC 26.3): the game JVM calls this on the overlay's
+ * org.lwjgl.glfw.CallbackBridge; we forward to the Dalvik-side CallbackBridge
+ * which performs System.loadLibrary("SDL3"), SDL.setupJNI() and flips
+ * MinecraftGLSurface.sdlEnabled. Signature matches Amethyst:
+ * notifyLauncher(int type, int... actions) => JNI (I[I)Z.
+ */
+JNIEXPORT jboolean JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeNotifyLauncher(JNIEnv *env, __attribute__((unused)) jclass clazz, jint type, jintArray actions) {
+    if (pojav_environ->dalvikJavaVMPtr == NULL || pojav_environ->bridgeClazz == NULL || method_notifyLauncher == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, "Native", "nativeNotifyLauncher: bridge not ready");
+        return JNI_FALSE;
+    }
+
+    JNIEnv *dalvikEnv;
+    (*pojav_environ->dalvikJavaVMPtr)->AttachCurrentThread(pojav_environ->dalvikJavaVMPtr, &dalvikEnv, NULL);
+
+    jsize len = actions != NULL ? (*env)->GetArrayLength(env, actions) : 0;
+    jint *elems = actions != NULL ? (*env)->GetIntArrayElements(env, actions, NULL) : NULL;
+    jintArray dalvikActions = len > 0 ? (*dalvikEnv)->NewIntArray(dalvikEnv, len) : NULL;
+    if (dalvikActions != NULL && elems != NULL) {
+        (*dalvikEnv)->SetIntArrayRegion(dalvikEnv, dalvikActions, 0, len, elems);
+    }
+
+    jboolean r = (*dalvikEnv)->CallStaticBooleanMethod(dalvikEnv, pojav_environ->bridgeClazz, method_notifyLauncher, type, dalvikActions);
+
+    if (dalvikActions != NULL) (*dalvikEnv)->DeleteLocalRef(dalvikEnv, dalvikActions);
+    if (elems != NULL) (*env)->ReleaseIntArrayElements(env, actions, elems, 0);
+    if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) {
+        (*dalvikEnv)->ExceptionClear(dalvikEnv);
+        __android_log_print(ANDROID_LOG_ERROR, "Native", "Dalvik notifyLauncher threw");
+        r = JNI_FALSE;
+    }
+    // Deliberately NOT detaching: SDL caches this thread's JNIEnv in pthread
+    // TLS (Android_JNI_GetEnv), so a detach here leaves SDL with a freed env
+    // and the next Java callback jumps through a dead function table.
+    return r;
+}
+
+static void *sdl_handle = NULL;
+typedef jint (*jni_onload_func_t)(JavaVM *, void *);
+
+/**
+ * 26.3 SDL bring-up (called from the game JVM's overlay SDL class):
+ *  - dlopen libSDL3.so from the CALLER's namespace (the JVM's), so SDL, EGL and
+ *    MobileGlues all end up in one linker namespace and share one instance;
+ *  - invoke SDL's JNI_OnLoad with the DALVIK VM (after attaching this thread),
+ *    so SDL's Android glue caches the right VM and registers SDLActivity's
+ *    native methods on the Dalvik classes.
+ * HotSpot must never call JNI_OnLoad here (it would cache the JRE VM).
+ */
+JNIEXPORT jboolean JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeInitSdl(JNIEnv *env, __attribute__((unused)) jclass clazz, jstring path) {
+    if (path == NULL) return JNI_FALSE;
+    const char *cpath = (*env)->GetStringUTFChars(env, path, NULL);
+    if (cpath == NULL) return JNI_FALSE;
+
+    if (sdl_handle == NULL) {
+        sdl_handle = dlopen(cpath, RTLD_NOW | RTLD_LOCAL);
+        if (sdl_handle == NULL) {
+            __android_log_print(ANDROID_LOG_ERROR, "QCXSDL", "dlopen(%s) failed: %s", cpath, dlerror());
+        }
+    }
+    (*env)->ReleaseStringUTFChars(env, path, cpath);
+    if (sdl_handle == NULL) return JNI_FALSE;
+
+    jni_onload_func_t onload = (jni_onload_func_t) dlsym(sdl_handle, "JNI_OnLoad");
+    if (onload == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, "QCXSDL", "libSDL3 has no JNI_OnLoad");
+        return JNI_FALSE;
+    }
+
+    JavaVM *dalvik = pojav_environ != NULL ? pojav_environ->dalvikJavaVMPtr : NULL;
+    if (dalvik == NULL || pojav_environ->bridgeClazz == NULL) {
+        __android_log_print(ANDROID_LOG_ERROR, "QCXSDL", "Dalvik VM/bridge not registered yet");
+        return JNI_FALSE;
+    }
+
+    JNIEnv *dalvikEnv = NULL;
+    if ((*dalvik)->GetEnv(dalvik, (void **) &dalvikEnv, JNI_VERSION_1_4) != JNI_OK) {
+        if ((*dalvik)->AttachCurrentThread(dalvik, &dalvikEnv, NULL) != JNI_OK) {
+            __android_log_print(ANDROID_LOG_ERROR, "QCXSDL", "attach to Dalvik failed");
+            return JNI_FALSE;
+        }
+    }
+
+    // FindClass inside SDL's JNI_OnLoad must run with an app-classloader Java
+    // frame; a bare native-attached thread only sees the boot classloader.
+    jmethodID mid = (*dalvikEnv)->GetStaticMethodID(
+            dalvikEnv, pojav_environ->bridgeClazz, "runSdlJniOnLoad", "(J)Z");
+    if (mid == NULL) {
+        if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) (*dalvikEnv)->ExceptionClear(dalvikEnv);
+        __android_log_print(ANDROID_LOG_ERROR, "QCXSDL", "CallbackBridge.runSdlJniOnLoad missing");
+        return JNI_FALSE;
+    }
+
+    jboolean ok = (*dalvikEnv)->CallStaticBooleanMethod(
+            dalvikEnv, pojav_environ->bridgeClazz, mid, (jlong) (uintptr_t) onload);
+    if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) {
+        (*dalvikEnv)->ExceptionClear(dalvikEnv);
+        ok = JNI_FALSE;
+    }
+    __android_log_print(ANDROID_LOG_INFO, "QCXSDL", "SDL JNI_OnLoad via Dalvik -> %d", ok);
+    // Keep the thread attached: SDL caches this thread's JNIEnv in TLS.
+    return ok;
+}
+
+JNIEXPORT void JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeNotifyGameReady(__attribute__((unused)) JNIEnv *env, __attribute__((unused)) jclass clazz) {
+    JavaVM *dalvik = pojav_environ != NULL ? pojav_environ->dalvikJavaVMPtr : NULL;
+    if (dalvik == NULL || pojav_environ->bridgeClazz == NULL) return;
+    JNIEnv *dalvikEnv = NULL;
+    if ((*dalvik)->GetEnv(dalvik, (void **) &dalvikEnv, JNI_VERSION_1_4) != JNI_OK) {
+        if ((*dalvik)->AttachCurrentThread(dalvik, &dalvikEnv, NULL) != JNI_OK) return;
+    }
+    jmethodID mid = (*dalvikEnv)->GetStaticMethodID(
+            dalvikEnv, pojav_environ->bridgeClazz, "onGameReady", "()V");
+    if (mid == NULL) {
+        if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) (*dalvikEnv)->ExceptionClear(dalvikEnv);
+        return;
+    }
+    (*dalvikEnv)->CallStaticVoidMethod(dalvikEnv, pojav_environ->bridgeClazz, mid);
+    if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) (*dalvikEnv)->ExceptionClear(dalvikEnv);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeHookSdlWindows(__attribute__((unused)) JNIEnv *env, __attribute__((unused)) jclass clazz, jlong sdl_handle) {
+    install_sdl_window_hooks((void *) (uintptr_t) sdl_handle);
+    return JNI_TRUE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeRunSdlJniOnLoad(JNIEnv *env, __attribute__((unused)) jclass clazz, jlong address) {
+    JavaVM *vm = NULL;
+    (*env)->GetJavaVM(env, &vm);
+    jni_onload_func_t onload = (jni_onload_func_t) (uintptr_t) address;
+    if (vm == NULL || onload == NULL) return JNI_FALSE;
+    jint version = onload(vm, NULL);
+    return version != JNI_ERR ? JNI_TRUE : JNI_FALSE;
+}
+
+/**
+ * Game-JVM side: forward to the Dalvik class so that JNI_OnLoad runs with an
+ * app-classloader Java frame on the stack (its FindClass must see app classes).
+ */
+JNIEXPORT jboolean JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeRunSdlJniOnLoadViaDalvik(JNIEnv *env, __attribute__((unused)) jclass clazz, jlong address) {
+    JavaVM *dalvik = pojav_environ != NULL ? pojav_environ->dalvikJavaVMPtr : NULL;
+    if (dalvik == NULL || pojav_environ->bridgeClazz == NULL) return JNI_FALSE;
+
+    JNIEnv *dalvikEnv = NULL;
+    if ((*dalvik)->GetEnv(dalvik, (void **) &dalvikEnv, JNI_VERSION_1_4) != JNI_OK) {
+        if ((*dalvik)->AttachCurrentThread(dalvik, &dalvikEnv, NULL) != JNI_OK) return JNI_FALSE;
+    }
+    jmethodID mid = (*dalvikEnv)->GetStaticMethodID(
+            dalvikEnv, pojav_environ->bridgeClazz, "runSdlJniOnLoad", "(J)Z");
+    if (mid == NULL) {
+        if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) (*dalvikEnv)->ExceptionClear(dalvikEnv);
+        return JNI_FALSE;
+    }
+    jboolean ok = (*dalvikEnv)->CallStaticBooleanMethod(
+            dalvikEnv, pojav_environ->bridgeClazz, mid, address);
+    if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) {
+        (*dalvikEnv)->ExceptionClear(dalvikEnv);
+        ok = JNI_FALSE;
+    }
+    return ok;
+}
+
+static jmethodID method_sdlSymbol = NULL;
+
+/**
+ * One native for both VM copies of libpojavexec:
+ *  - invoked on the Dalvik VM  -> dlsym the libSDL3 loaded in the app namespace;
+ *  - invoked on the game JVM   -> forward to the Dalvik CallbackBridge.sdlSymbol,
+ *    which runs this same function in the Dalvik copy.
+ * This keeps exactly one libSDL3 instance (the one with SDL's Android JNI glue).
+ */
+JNIEXPORT jlong JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeSdlSymbol(JNIEnv *env, __attribute__((unused)) jclass clazz, jstring name) {
+    if (name == NULL) return 0;
+
+    JavaVM *vm = NULL;
+    (*env)->GetJavaVM(env, &vm);
+
+    if (pojav_environ != NULL && pojav_environ->dalvikJavaVMPtr != NULL &&
+            vm != pojav_environ->dalvikJavaVMPtr) {
+        JNIEnv *dalvikEnv = NULL;
+        if ((*pojav_environ->dalvikJavaVMPtr)->AttachCurrentThread(
+                pojav_environ->dalvikJavaVMPtr, &dalvikEnv, NULL) != JNI_OK || dalvikEnv == NULL) {
+            return 0;
+        }
+
+        jlong result = 0;
+        const char *cname = (*env)->GetStringUTFChars(env, name, NULL);
+        if (cname != NULL) {
+            jstring dname = (*dalvikEnv)->NewStringUTF(dalvikEnv, cname);
+            (*env)->ReleaseStringUTFChars(env, name, cname);
+            if (dname != NULL) {
+                if (method_sdlSymbol == NULL) {
+                    method_sdlSymbol = (*dalvikEnv)->GetStaticMethodID(
+                            dalvikEnv, pojav_environ->bridgeClazz, "sdlSymbol", "(Ljava/lang/String;)J");
+                }
+                if (method_sdlSymbol != NULL) {
+                    result = (*dalvikEnv)->CallStaticLongMethod(
+                            dalvikEnv, pojav_environ->bridgeClazz, method_sdlSymbol, dname);
+                }
+                (*dalvikEnv)->DeleteLocalRef(dalvikEnv, dname);
+                if ((*dalvikEnv)->ExceptionCheck(dalvikEnv)) {
+                    (*dalvikEnv)->ExceptionClear(dalvikEnv);
+                }
+            }
+        }
+        // Keep the thread attached; see the note in nativeNotifyLauncher.
+        return result;
+    }
+
+    const char *cname = (*env)->GetStringUTFChars(env, name, NULL);
+    void *handle = dlopen("libSDL3.so", RTLD_NOLOAD);
+    void *sym = (handle != NULL && cname != NULL) ? dlsym(handle, cname) : NULL;
+    if (cname != NULL) (*env)->ReleaseStringUTFChars(env, name, cname);
+    return (jlong) (uintptr_t) sym;
+}
+
+/**
+ * Phase 0 diagnostic: addresses of SDL_Init as seen from this (Dalvik/app)
+ * namespace. The overlay logs its own value right before it calls the same
+ * function; if the two differ the linker mapped a second libSDL3 copy and the
+ * surface/JNI state would be split between them.
+ */
+JNIEXPORT jlong JNICALL
+Java_org_lwjgl_glfw_CallbackBridge_nativeSdlInitAddress(__attribute__((unused)) JNIEnv *env, __attribute__((unused)) jclass clazz) {
+    void *handle = dlopen("libSDL3.so", RTLD_NOLOAD);
+    void *sym = handle != NULL ? dlsym(handle, "SDL_Init") : NULL;
+    __android_log_print(ANDROID_LOG_INFO, "QCXSDL", "Dalvik SDL_Init=%p handle=%p", sym, handle);
+    return (jlong) (uintptr_t) sym;
 }
 
 jboolean critical_send_char(jchar codepoint) {
@@ -483,7 +780,9 @@ void noncritical_send_cursor_pos(__attribute__((unused)) JNIEnv* env, __attribut
      _a > _b ? _a : _b; })
 void critical_send_key(jint key, jint scancode, jint action, jint mods) {
     if (pojav_environ->GLFW_invoke_Key && pojav_environ->isInputReady) {
-        pojav_environ->keyDownBuffer[max(0, key-31)] = (jbyte) action;
+        // 26.3 has no GLFW class, so the key/mouse buffers were never resolved;
+        // writing through a NULL pointer would crash the SDL path.
+        if (pojav_environ->keyDownBuffer) pojav_environ->keyDownBuffer[max(0, key-31)] = (jbyte) action;
         if (pojav_environ->isUseStackQueueCall) {
             sendData(EVENT_TYPE_KEY, key, scancode, action, mods);
         } else {
@@ -497,7 +796,7 @@ void noncritical_send_key(__attribute__((unused)) JNIEnv* env, __attribute__((un
 
 void critical_send_mouse_button(jint button, jint action, jint mods) {
     if (pojav_environ->GLFW_invoke_MouseButton && pojav_environ->isInputReady) {
-        pojav_environ->mouseDownBuffer[max(0, button)] = (jbyte) action;
+        if (pojav_environ->mouseDownBuffer) pojav_environ->mouseDownBuffer[max(0, button)] = (jbyte) action;
         if (pojav_environ->isUseStackQueueCall) {
             sendData(EVENT_TYPE_MOUSE_BUTTON, button, action, mods, 0);
         } else {
@@ -556,7 +855,7 @@ JNIEXPORT void JNICALL Java_org_lwjgl_glfw_GLFW_nglfwSetShowingWindow(__attribut
 }
 
 JNIEXPORT void JNICALL Java_org_lwjgl_glfw_CallbackBridge_nativeSetWindowAttrib(__attribute__((unused)) JNIEnv* env, __attribute__((unused)) jclass clazz, jint attrib, jint value) {
-    if (!pojav_environ->showingWindow || !pojav_environ->isUseStackQueueCall) {
+    if (!s_runtimeHasGlfw || !pojav_environ->showingWindow || !pojav_environ->isUseStackQueueCall) {
         // If the window is not shown, there is nothing to do yet.
         // For Minecraft < 1.13, calling to JNI functions here crashes the JVM for some reason, therefore it is skipped for now.
         return;

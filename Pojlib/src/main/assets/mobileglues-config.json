@@ -1,0 +1,12 @@
+{
+  "launcherManaged": 2,
+  "enableANGLE": 2,
+  "enableNoError": 2,
+  "enableExtTimerQuery": 1,
+  "enableExtComputeShader": 0,
+  "enableExtDirectStateAccess": 1,
+  "maxGlslCacheSize": 128,
+  "customGLVersion": 0,
+  "angleDepthClearFixMode": 0,
+  "fsr1Setting": 0
+}

@@ -121,7 +121,7 @@
   "vrFreeMoveMode": "CONTROLLER",
   "walkMultiplier": "1.0",
   "fovReduction": "false",
-  "menuAlwaysFollowFace": "false",
+  "menuAlwaysFollowFace": "true",
   "hudMaxScale": "false",
   "vrHudLockMode": "WRIST",
   "shouldRenderSelf": "false",

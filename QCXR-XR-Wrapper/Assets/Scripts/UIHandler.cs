@@ -138,6 +138,13 @@ public class UIHandler : MonoBehaviour
         }
     }
 
+    /** Applies a restored selection to every version dropdown without firing onValueChanged. */
+    public void SyncInstanceSelection(int index)
+    {
+        selectedInstance = index;
+        UpdateDropdowns(false, null);
+    }
+
     public void ClearDropdowns()
     {
         dropdownMain.ClearOptions();

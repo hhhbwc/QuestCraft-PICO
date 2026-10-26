@@ -108,7 +108,16 @@ public class OfflineSkin {
         if (parent != null) parent.mkdirs();
 
         byte[] png = Files.readAllBytes(skin.toPath());
-        String meta = "{\n  \"pack\": {\n    \"pack_format\": 88,\n    \"description\": \"Offline skin\"\n  }\n}\n";
+        // 26.2 (resource format 88) requires min_format/max_format; a bare pack_format is
+        // rejected, and supported_formats is deprecated from format 65 onwards.
+        String meta = "{\n"
+                + "  \"pack\": {\n"
+                + "    \"pack_format\": 88,\n"
+                + "    \"min_format\": 88,\n"
+                + "    \"max_format\": 255,\n"
+                + "    \"description\": \"Offline skin\"\n"
+                + "  }\n"
+                + "}\n";
 
         try (ZipOutputStream zip = new ZipOutputStream(new FileOutputStream(pack))) {
             zip.putNextEntry(new ZipEntry("pack.mcmeta"));

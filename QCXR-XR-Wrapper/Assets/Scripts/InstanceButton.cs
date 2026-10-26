@@ -1,3 +1,4 @@
+using System;
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
@@ -52,7 +53,31 @@ public class InstanceButton : MonoBehaviour
     {
         if (Application.platform != RuntimePlatform.Android) return;
         currInstName = JNIStorage.instance.instancesDropdown.options[JNIStorage.instance.instancesDropdown.value].text;
-        configHandler.SetLastSelectedInstance(JNIStorage.instance.instancesDropdown.value);
+        PersistSelectedInstance();
+    }
+
+    /** Best-effort only: a failed save must never block launching. */
+    private void PersistSelectedInstance()
+    {
+        ConfigHandler handler = configHandler;
+        if (handler == null && JNIStorage.instance != null)
+        {
+            // The scene leaves InstanceButton.configHandler empty; JNIStorage has it.
+            handler = JNIStorage.instance.configHandler;
+        }
+        if (handler == null || JNIStorage.instance == null || JNIStorage.instance.instancesDropdown == null)
+        {
+            return;
+        }
+
+        try
+        {
+            handler.SetLastSelectedInstance(JNIStorage.instance.instancesDropdown.value);
+        }
+        catch (Exception e)
+        {
+            Debug.LogWarning("Could not persist the selected instance: " + e);
+        }
     }
 
     private static void CreateDefaultInstance(string name)
@@ -66,6 +91,9 @@ public class InstanceButton : MonoBehaviour
     {
         if (launchInProgress)
             return;
+
+        // Persist the version that is actually launched, not only dropdown changes.
+        PersistSelectedInstance();
 
         if (JNIStorage.GetInstance(currInstName) == null)
         {

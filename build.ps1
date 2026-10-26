@@ -111,6 +111,15 @@ Clear-ReadOnly (Join-Path $WrapDir 'Temp')
 # ---------------- AAR ----------------
 if (-not $SkipAar) {
     Step '构建 Pojlib AAR'
+    # Keep the SDL overlay jar in sync with its sources (tools/overlay341).
+    $overlaySrc = Join-Path (Split-Path -Parent $Root) 'tools\overlay341\lwjgl-sdl-overlay-3.4.1.jar'
+    $overlayDst = Join-Path $PojlibDir 'src\main\assets\components\lwjgl3\3.4.1\lwjgl-sdl-overlay-3.4.1.jar'
+    if (Test-Path $overlaySrc) {
+        Copy-Item $overlaySrc $overlayDst -Force
+        Write-Host "   SDL overlay synced from tools/overlay341"
+    } else {
+        Warn 'tools/overlay341 overlay jar not found; packaging the committed copy'
+    }
     $env:JAVA_HOME = $Jdk17
     $env:PATH      = (Join-Path $Jdk17 'bin') + ';' + $env:PATH
     $env:HOST_OS   = 'windows'

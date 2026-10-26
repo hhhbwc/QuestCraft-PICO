@@ -3,17 +3,22 @@ package org.lwjgl.glfw;
 import android.app.Activity;
 import android.content.*;
 import android.view.Choreographer;
+import android.util.Log;
 
 import androidx.annotation.Nullable;
 
 import java.util.ArrayList;
 
 import dalvik.annotation.optimization.CriticalNative;
+import org.libsdl.app.SDL;
+import org.libsdl.app.SDLActivity;
 import pojlib.UnityPlayerActivity;
 
 import pojlib.UnityPlayerActivity;
 import pojlib.input.GrabListener;
 import pojlib.input.LwjglGlfwKeycode;
+import pojlib.input.MinecraftGLSurface;
+import pojlib.util.Logger;
 
 public class CallbackBridge {
     private static boolean isGrabbing = false;
@@ -123,6 +128,63 @@ public class CallbackBridge {
     }
 
 
+    // Notification types (mirrors Amethyst-Android's CallbackBridge)
+    public static final int NOTIF_TYPE_SDL = 0;
+
+    // Notification actions
+    public static final int ACTION_INIT_LAUNCHER_INTEGRATION = 0;
+    public static final int ACTION_SEND_TEXTBOX_RECT = 1;
+    public static final int ACTION_INIT_CONTROLLER = 2;
+    public static final int ACTION_DEINIT_CONTROLLER = 3;
+
+    /**
+     * Used for any sort of notification that needs to be given from the JRE side.
+     * Reached through libpojavexec's Java_org_lwjgl_glfw_CallbackBridge_nativeNotifyLauncher.
+     * For NOTIF_TYPE_SDL / ACTION_INIT_LAUNCHER_INTEGRATION this performs the Dalvik-side
+     * SDL bring-up: System.loadLibrary("SDL3") + SDL.setupJNI() + sdlEnabled = true.
+     * Must run on the Dalvik VM — the SDL android glue caches THIS VM, so if the game
+     * JVM loaded the library first, every org.libsdl.app callback would run on HotSpot.
+     */
+    // Called from JRE side via jni
+    @SuppressWarnings("unused")
+    public static boolean notifyLauncher(int type, int... action) {
+        switch (type) {
+            case NOTIF_TYPE_SDL:
+                if (action[0] == ACTION_INIT_LAUNCHER_INTEGRATION) {
+                    try {
+                        // SDL itself lives in the game JVM's linker namespace; its
+                        // JNI_OnLoad was already invoked with THIS VM by nativeInitSdl,
+                        // so the native methods below are registered on these classes.
+                        SDL.setupJNI();
+                        MinecraftGLSurface.sdlEnabled = true;
+                        // Phase 0 diagnostic: the JRE side logs its own SDL_Init
+                        // address too; both must match or two libSDL3 copies exist.
+                        Log.i("QCXSDL", "Dalvik SDL_Init=" + Long.toHexString(nativeSdlInitAddress()));
+                        if (SDLActivity.getSDLSurface() != null) {
+                            // Notifies SDL of native surface res which is needed for proper input handling
+                            SDLActivity.getSDLSurface().nativeResize(windowWidth, windowHeight);
+                        }
+                        Logger.getInstance().appendToLog("QuestCraft: SDL support enabled!");
+                        return true;
+                    } catch (Throwable t) {
+                        Logger.getInstance().appendToLog("QuestCraft: failed to initialize SDL launcher-side integration! We will likely crash");
+                        t.printStackTrace();
+                    }
+                }
+                if (action[0] == ACTION_SEND_TEXTBOX_RECT) {
+                    // TODO (post Phase 0): forward textbox rect for SDL IME support
+                }
+                if (action[0] == ACTION_INIT_CONTROLLER) {
+                    // TODO (post Phase 0): SDL controller integration
+                }
+                if (action[0] == ACTION_DEINIT_CONTROLLER) {
+                    // TODO (post Phase 0): SDL controller integration
+                }
+                break;
+        }
+        return false;
+    }
+
     public static int getCurrentMods() {
         int currMods = 0;
         if (holdingAlt) {
@@ -200,5 +262,36 @@ public class CallbackBridge {
     public static native void nativeSetWindowAttrib(int attrib, int value);
     static {
         System.loadLibrary("pojavexec");
+    }
+
+    /** Returns SDL_Init as resolved in the Dalvik namespace (Phase 0 diagnostic). */
+    private static native long nativeSdlInitAddress();
+
+    /**
+     * Resolves a libSDL3 symbol in this (Dalvik) linker namespace. Called from the
+     * game JVM through libpojavexec so that both VMs share ONE libSDL3 instance
+     * (the one whose JNI_OnLoad ran on this VM and whose surface is bound).
+     */
+    public static long sdlSymbol(String name) {
+        return nativeSdlSymbol(name);
+    }
+
+    private static native long nativeSdlSymbol(String name);
+
+    /**
+     * Runs SDL's JNI_OnLoad from a Java frame of THIS (app) classloader, so its
+     * FindClass("org/libsdl/app/SDLActivity") resolves. The address comes from
+     * the game JVM's libSDL3 instance (nativeInitSdl).
+     */
+    public static boolean runSdlJniOnLoad(long address) {
+        return nativeRunSdlJniOnLoad(address);
+    }
+
+    private static native boolean nativeRunSdlJniOnLoad(long address);
+
+    /** Called from the game JVM when the first frame has been presented. */
+    public static void onGameReady() {
+        pojlib.API.gameReady = true;
+        pojlib.util.Logger.getInstance().appendToLog("QuestCraft: game reported ready (first frame)");
     }
 }

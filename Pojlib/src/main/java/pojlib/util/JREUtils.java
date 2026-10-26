@@ -63,7 +63,7 @@ public class JREUtils {
         return libName;
     }
 
-    /** The APK's own freetype (Bionic, 2.13+) is the only one LWJGL 3.3.6 can use;
+    /** The APK's own freetype (Bionic, 2.13+) is the only one LWJGL can use;
      *  the JRE bundles an old 2.9 build under the same SONAME. */
     private static String preferredFreetype() {
         if (sNativeLibDir != null) {
@@ -212,6 +212,17 @@ public class JREUtils {
         envMap.put("ALSOFT_CONF", openAlConfig.getAbsolutePath());
         envMap.put("ALSOFT_DRIVERS", "opensl,null");
         envMap.put("ALSOFT_LOGLEVEL", "0");
+        if (Installer.isSdlVersion(instance.versionName)) {
+            // SDL loads its EGL provider itself; point it at MobileGlues (the same
+            // library libpojavexec uses for GLFW) instead of the system libEGL.
+            String graphicsLib = loadGraphicsLibrary(instance.versionName);
+            envMap.put("SDL_EGL_LIBRARY", graphicsLib);
+            // MC passes a null path to SDL_GL_LoadLibrary (LWJGL cannot report a
+            // library path on Bionic); the hint makes SDL load MobileGlues anyway.
+            envMap.put("SDL_OPENGL_LIBRARY", graphicsLib);
+            envMap.put("SDL_OPENGL_FORCE_SRGB_FRAMEBUFFER", "0");
+            envMap.put("POJAVEXEC_EGL", graphicsLib);
+        }
 
         envMap.put("LD_LIBRARY_PATH", LD_LIBRARY_PATH);
         envMap.put("PATH", activity.getFilesDir() + "/runtimes/JRE/bin:" + Os.getenv("PATH"));
@@ -241,18 +252,31 @@ public class JREUtils {
     }
 
     // Called before game launch to ensure all files are present and correct
+    private static long prelaunchMark(String what, long since) {
+        long now = android.os.SystemClock.elapsedRealtime();
+        Logger.getInstance().appendToLog("prelaunch: " + what + " took " + (now - since) + " ms");
+        return now;
+    }
+
     public static boolean prelaunchCheck(Activity activity, MinecraftInstances.Instance instance) throws Throwable {
+        long pt = android.os.SystemClock.elapsedRealtime();
         runtimeDir = activity.getFilesDir() + "/runtimes/JRE";
         JREUtils.relocateLibPath(activity, instance);
         VersionInfo versionInfo = MinecraftMeta.getVersionInfo(instance.versionName);
         Installer.installJVM(activity, false, versionInfo);
+        pt = prelaunchMark("env+JVM check", pt);
         setJavaEnvironment(activity, instance);
 
-        UnityPlayerActivity.installLWJGL(activity);
+        UnityPlayerActivity.installLWJGL(activity, instance.versionName);
+        pt = prelaunchMark("LWJGL runtime", pt);
         Installer.installClient(versionInfo, Constants.USER_HOME).get();
+        pt = prelaunchMark("client", pt);
         Installer.installLibraries(versionInfo, Constants.USER_HOME).get();
+        pt = prelaunchMark("libraries", pt);
         Installer.installAssets(versionInfo, Constants.USER_HOME).get();
+        pt = prelaunchMark("assets", pt);
         Installer.refreshLaunchCompatibilityAssets(activity, instance);
+        pt = prelaunchMark("compat assets", pt);
 
         if(!initJavaRuntime()) {
             Installer.installJVM(activity, true, versionInfo);
@@ -265,9 +289,15 @@ public class JREUtils {
 
     public static int launchJavaVM(final Activity activity, final List<String> JVMArgs, MinecraftInstances.Instance instance) throws Throwable {
         Logger.getInstance().appendToLog("QuestCraft: launchJavaVM entered, building JVM args...");
-        final String graphicsLib = loadGraphicsLibrary();
+        final String graphicsLib = loadGraphicsLibrary(instance.versionName);
         List<String> userArgs = getJavaArgs(activity, instance);
         int javaMajor = getInstalledJavaMajor(activity);
+        // 26.3 (SDL) only: install the bytehook/SDL native hooks BEFORE the game JVM
+        // starts. Every other version keeps the previous behavior untouched.
+        boolean sdlVersion = Installer.isSdlVersion(instance.versionName);
+        if (sdlVersion) {
+            initializeHooks();
+        }
 
         //Add automatically generated args
         if (API.customRAMValue) {
@@ -285,13 +315,35 @@ public class JREUtils {
 
             userArgs.add("-Xms" + 1024 + "M");
             userArgs.add("-Xmx" + allocatedRam + "M");
+            if (Installer.isSdlVersion(instance.versionName)) {
+                // VR: the Unity launcher and the OpenXR compositor share the same
+                // 8GB; availMem over-reports what the JVM can take, and the earlier
+                // uncapped -Xmx drove the ZGC heap into swap storms that showed up
+                // as server-thread stalls (mob motion freezes). Cap it for SDL
+                // versions only; 26.2 and older keep the existing behavior.
+                long heapCap = Math.min(allocatedRam, 3072);
+                userArgs.set(userArgs.size() - 1, "-Xmx" + heapCap + "M");
+                Logger.getInstance().appendToLog("SDL heap capped to " + heapCap + "MB");
+            }
         }
 
         initializeExtraNatives(instance);
-        preloadLaunchLibraries(activity, graphicsLib);
+        preloadLaunchLibraries(activity, graphicsLib, sdlVersion);
 
         if(javaMajor >= 25) {
             userArgs.add("-XX:+IgnoreUnrecognizedVMOptions");
+            // GC log to stdout: stdio_is pipes it into the launcher log, so GC
+            // collector/pause evidence lands in files/latestlog.txt on every run.
+            userArgs.add("-Xlog:gc");
+            // ZGC like the pre-25 branch: the default G1 shows visible pauses on
+            // entity-heavy moments (attack particles allocate in bursts), which
+            // reads as stuttery mob animations in VR. All flags below are ignored
+            // gracefully (IgnoreUnrecognizedVMOptions) if a runtime drops one.
+            userArgs.add("-XX:+UnlockExperimentalVMOptions");
+            userArgs.add("-XX:+UseZGC");
+            userArgs.add("-XX:+ZGenerational");
+            userArgs.add("-XX:-ZProactive");
+            userArgs.add("-XX:+UnlockDiagnosticVMOptions");
             userArgs.add("-XX:+DisableExplicitGC");
             userArgs.add("-XX:-UsePerfData");
             userArgs.add("-XX:-UseContainerSupport");
@@ -308,7 +360,7 @@ public class JREUtils {
             userArgs.add("-XX:+DisableExplicitGC");
         }
 
-        addLwjglCompatibilityArgs(activity, userArgs, graphicsLib);
+        addLwjglCompatibilityArgs(activity, userArgs, graphicsLib, sdlVersion);
 
         userArgs.addAll(JVMArgs);
         System.out.println(JVMArgs);
@@ -341,13 +393,18 @@ public class JREUtils {
         return 0;
     }
 
-    private static void preloadLaunchLibraries(Activity activity, String graphicsLib) {
+    private static void preloadLaunchLibraries(Activity activity, String graphicsLib, boolean sdlVersion) {
         String nativeDir = activity.getApplicationInfo().nativeLibraryDir;
-        dlopen(new File(nativeDir, "liblwjgl.so").getAbsolutePath());
-        dlopen(new File(nativeDir, "libshaderc.so").getAbsolutePath());
-        dlopen(new File(nativeDir, "libspirv-cross-c-shared.so").getAbsolutePath());
-        dlopen(new File(nativeDir, "liblwjgl_vma.so").getAbsolutePath());
-        dlopen(new File(nativeDir, "libopenal.so").getAbsolutePath());
+        if (!sdlVersion) {
+            dlopen(new File(nativeDir, "liblwjgl.so").getAbsolutePath());
+            dlopen(new File(nativeDir, "libshaderc.so").getAbsolutePath());
+            dlopen(new File(nativeDir, "libspirv-cross-c-shared.so").getAbsolutePath());
+            dlopen(new File(nativeDir, "liblwjgl_vma.so").getAbsolutePath());
+            dlopen(new File(nativeDir, "libopenal.so").getAbsolutePath());
+        }
+        // 26.3: the LWJGL 3.4.1 natives are loaded by LWJGL from the APK's
+        // nativeLibraryDir (*341 names); preloading them here is unnecessary and
+        // the game JVM would resolve a second copy in its own linker namespace.
         dlopen(new File(nativeDir, graphicsLib).getAbsolutePath());
         dlopen("/system/lib64/libvulkan.so");
     }
@@ -397,6 +454,16 @@ public class JREUtils {
      * @param ctx The application context
      * @return A list filled with args.
      */
+    /**
+     * org.lwjgl.librarypath is always the APK's nativeLibraryDir: the game JVM's
+     * linker namespace forbids dlopen of app-private paths. 26.3 resolves its
+     * versioned 3.4.1 natives (*341) through libname properties and the bundled
+     * name mapper; 26.2 and older keep the original names.
+     */
+    private static String lwjglLibraryPath(Context ctx) {
+        return ctx.getApplicationInfo().nativeLibraryDir;
+    }
+
     public static List<String> getJavaArgs(Context ctx, MinecraftInstances.Instance instance) {
         File resConfFile = new File(Constants.USER_HOME + "/hacks/resolv.conf");
         File mgDir = new File(ctx.getFilesDir(), "mg");
@@ -431,7 +498,7 @@ public class JREUtils {
                 "-Doshi.os.linux.allowudev=false",
                 "-Doshi.os.linux.procfs.logwarning=false",
                 "-Doshi.os.unix.whoCommand=true",
-                "-Dorg.lwjgl.librarypath=" + ctx.getApplicationInfo().nativeLibraryDir,
+                "-Dorg.lwjgl.librarypath=" + lwjglLibraryPath(ctx),
                 "-Djna.boot.library.path=" + ctx.getApplicationInfo().nativeLibraryDir,
                 "-Djna.nosys=true",
                 "-Djna.nounpack=true",
@@ -607,7 +674,7 @@ public class JREUtils {
         }
     }
 
-    private static void addLwjglCompatibilityArgs(Activity activity, List<String> userArgs, String graphicsLib) {
+    private static void addLwjglCompatibilityArgs(Activity activity, List<String> userArgs, String graphicsLib, boolean sdlVersion) {
         String nativeDir = activity.getApplicationInfo().nativeLibraryDir;
         String lwjglExtractDir = new File(activity.getCacheDir(), "lwjgl-natives").getAbsolutePath();
 
@@ -618,16 +685,32 @@ public class JREUtils {
         userArgs.add("-Dorg.lwjgl.opengles.libname=/system/lib64/libGLESv3.so");
         userArgs.add("-Dorg.lwjgl.egl.libname=/system/lib64/libEGL.so");
         userArgs.add("-Dorg.lwjgl.vulkan.libname=/system/lib64/libvulkan.so");
-        userArgs.add("-Dorg.lwjgl.shaderc.libname=libshaderc.so");
-        userArgs.add("-Dorg.lwjgl.spvc.libname=spirv-cross-c-shared");
+        userArgs.add("-Dorg.lwjgl.system.SharedLibraryExtractPath=" + lwjglExtractDir);
         userArgs.add("-Dorg.lwjgl.openxr.libname=libopenxr_loader.so");
-        userArgs.add("-Dorg.lwjgl.openal.libname=libopenal.so");
-        userArgs.add("-Dorg.lwjgl.stb.libname=liblwjgl_stb.so");
         userArgs.add("-Dorg.lwjgl.nanovg.libname=liblwjgl_nanovg.so");
         userArgs.add("-Dorg.lwjgl.tinyfd.libname=liblwjgl_tinyfd.so");
         userArgs.add("-Dorg.lwjgl.lmdb.libname=liblwjgl_lmdb.so");
         userArgs.add("-Dorg.lwjgl.openvr.libname=liblwjgl_openvr.so");
-        userArgs.add("-Dorg.lwjgl.system.SharedLibraryExtractPath=" + lwjglExtractDir);
+        if (sdlVersion) {
+            // LWJGL 3.4.1 runtime. Core/opengl/stb/vma/freetype natives ship in the
+            // APK as *341 because the unsuffixed names belong to the 3.3.x runtime
+            // used by 26.2; the mapper below renames the bundled modules that have
+            // no libname property. shaderc needs 3.4.1 (new symbol); openal and
+            // spirv-cross are the long-standing APK copies (same C API).
+            userArgs.add("-Dorg.lwjgl.system.bundledLibrary.nameMapper=pojlib.lwjgl.BundledLibraryNames341");
+            userArgs.add("-Dorg.lwjgl.shaderc.libname=shaderc341");
+            userArgs.add("-Dorg.lwjgl.spvc.libname=spirv-cross-c-shared");
+            userArgs.add("-Dorg.lwjgl.openal.libname=libopenal.so");
+            userArgs.add("-Dorg.lwjgl.freetype.libname=freetype341");
+            userArgs.add("-Dorg.lwjgl.sdl.libname=libSDL3.so");
+            userArgs.add("-Dpojlib.sdl.diag=true");
+            userArgs.add("-Dpojlib.sdl.library=" + nativeDir + "/libSDL3.so");
+        } else {
+            userArgs.add("-Dorg.lwjgl.shaderc.libname=libshaderc.so");
+            userArgs.add("-Dorg.lwjgl.spvc.libname=spirv-cross-c-shared");
+            userArgs.add("-Dorg.lwjgl.openal.libname=libopenal.so");
+            userArgs.add("-Dorg.lwjgl.stb.libname=liblwjgl_stb.so");
+        }
     }
 
     private static void addJava25CompatibilityArgs(List<String> userArgs) {
@@ -662,8 +745,10 @@ public class JREUtils {
      * It will fallback if it fails to load the library.
      * @return The name of the loaded library
      */
-    public static String loadGraphicsLibrary(){
-        return "libmobileglues.so";
+    public static String loadGraphicsLibrary(String versionName){
+        // 26.3 carries a newer MobileGlues build (uniform-block fix needed by
+        // renderpearl/Vivecraft); older versions keep the 2.0.0 binary.
+        return Installer.isSdlVersion(versionName) ? "libmobileglues263.so" : "libmobileglues.so";
     }
 
     public static native long getEGLContextPtr();
@@ -674,6 +759,8 @@ public class JREUtils {
     public static native boolean dlopen(String libPath);
     public static native String dlerror();
     public static native void setLdLibraryPath(String ldLibraryPath);
+    /** Installs the bytehook-based SDL/dlopen native hooks (libpojavexec). 26.3+ only. */
+    public static native void initializeHooks();
 
     static {
         System.loadLibrary("pojavexec");
