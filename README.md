@@ -6,7 +6,7 @@ Unity 启动器 + Pojlib（Java 启动链）+ Vivecraft OpenXR + MobileGlues GL 
 按实例自动切换，互不污染。
 
 > **授权前提**：正常使用仍需你拥有 Minecraft: Java Edition。
-> 离线登录（Offline Login）仅用于绕过 PICO 环境下的微软授权流程，不提供盗版。
+> 离线登录（Offline Login）仅用于测试。
 
 ---
 
