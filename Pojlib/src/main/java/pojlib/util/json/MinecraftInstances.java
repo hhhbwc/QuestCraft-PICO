@@ -102,6 +102,13 @@ public class MinecraftInstances {
             if (account.isDemoMode) {
                 allArgs.add("--demo");
             }
+            if (API.extraGameArgs != null && !API.extraGameArgs.isEmpty()) {
+                for (String arg : API.extraGameArgs.split("\\|")) {
+                    if (!arg.isEmpty()) {
+                        allArgs.add(arg);
+                    }
+                }
+            }
 
             return allArgs;
         }

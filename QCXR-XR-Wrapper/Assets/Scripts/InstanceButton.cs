@@ -175,6 +175,15 @@ public class InstanceButton : MonoBehaviour
 
         JNIStorage.apiClass.CallStatic("releaseOpenXRHandoff");
         waitingForOpenXRHandoff = false;
+
+        // The launcher keeps rendering an invisible surface behind the game and was
+        // measured at ~20% of a core while playing. Throttle that loop until the game
+        // exits (the exit path restarts this activity from scratch). Disabling the
+        // cameras as well crashed il2cpp inside Unity's render path, so only the
+        // frame rate is capped here.
+        Application.targetFrameRate = 5;
+        QualitySettings.vSyncCount = 0;
+        AudioListener.pause = true;
     }
 
     public void KillInstance()
@@ -182,15 +191,25 @@ public class InstanceButton : MonoBehaviour
         JNIStorage.apiClass.CallStatic("restartLauncher", JNIStorage.activity);
     }
 
-    public async void MirrorNativesForInstance()
+    public void MirrorNativesForInstance()
     {
         PojlibInstance instance = JNIStorage.GetInstance(currInstName);
+        if (instance == null)
+        {
+            Debug.LogWarning("MirrorNativesForInstance: no instance selected");
+            return;
+        }
         JNIStorage.apiClass.CallStatic("mirrorNativesInFolder", JNIStorage.activity, JNIStorage.instancesObj, instance.raw, "/sdcard/Android/data/com.qcxr.qcxr/files/natives");
     }
 
-    public async void ImportSaves()
+    public void ImportSaves()
     {
         PojlibInstance instance = JNIStorage.GetInstance(currInstName);
+        if (instance == null)
+        {
+            Debug.LogWarning("ImportSaves: no instance selected");
+            return;
+        }
         JNIStorage.apiClass.CallStatic("unzipSavesFromFolder", instance.raw, "/sdcard/Android/data/com.qcxr.qcxr/files/import-saves");
     }
 }

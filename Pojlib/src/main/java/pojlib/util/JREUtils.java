@@ -260,23 +260,34 @@ public class JREUtils {
 
     public static boolean prelaunchCheck(Activity activity, MinecraftInstances.Instance instance) throws Throwable {
         long pt = android.os.SystemClock.elapsedRealtime();
+        long prelaunchStart = pt;
         runtimeDir = activity.getFilesDir() + "/runtimes/JRE";
         JREUtils.relocateLibPath(activity, instance);
-        VersionInfo versionInfo = MinecraftMeta.getVersionInfo(instance.versionName);
+        VersionInfo versionInfo = MinecraftMeta.getVersionInfoCached(instance.versionName);
         Installer.installJVM(activity, false, versionInfo);
         pt = prelaunchMark("env+JVM check", pt);
         setJavaEnvironment(activity, instance);
 
         UnityPlayerActivity.installLWJGL(activity, instance.versionName);
         pt = prelaunchMark("LWJGL runtime", pt);
-        Installer.installClient(versionInfo, Constants.USER_HOME).get();
+
+        // Both steps only validate their own files, so overlap the two scans.
+        java.util.concurrent.CompletableFuture<String> clientFuture =
+                Installer.installClient(versionInfo, Constants.USER_HOME);
+        java.util.concurrent.CompletableFuture<String> librariesFuture =
+                Installer.installLibraries(versionInfo, Constants.USER_HOME);
+        java.util.concurrent.CompletableFuture<String> assetsFuture =
+                Installer.installAssets(versionInfo, Constants.USER_HOME);
+        clientFuture.get();
         pt = prelaunchMark("client", pt);
-        Installer.installLibraries(versionInfo, Constants.USER_HOME).get();
+        librariesFuture.get();
         pt = prelaunchMark("libraries", pt);
-        Installer.installAssets(versionInfo, Constants.USER_HOME).get();
+        assetsFuture.get();
         pt = prelaunchMark("assets", pt);
         Installer.refreshLaunchCompatibilityAssets(activity, instance);
         pt = prelaunchMark("compat assets", pt);
+        Logger.getInstance().appendToLog("prelaunch: total "
+                + (android.os.SystemClock.elapsedRealtime() - prelaunchStart) + " ms");
 
         if(!initJavaRuntime()) {
             Installer.installJVM(activity, true, versionInfo);
@@ -376,6 +387,8 @@ public class JREUtils {
 
         final String[] launchArgs = userArgs.toArray(new String[0]);
         Thread jvmThread = new Thread(() -> {
+            long jvmStart = android.os.SystemClock.elapsedRealtime();
+            Logger.getInstance().appendToLog("launch: JVM thread start " + jvmStart);
             int exitCode = VMLauncher.launchJVM(launchArgs);
             Logger.getInstance().appendToLog("Java Exit code: " + exitCode);
             // Unity handed the XR session over to the game and stopped its own loader;

@@ -169,13 +169,13 @@ public class Installer {
 
                     // Re-download when missing OR mismatched (the previous check
                     // re-downloaded the valid file and then kept a corrupt one).
-                    if (!clientFile.exists() || !DownloadUtils.compareSHA1(clientFile, minecraftVersionInfo.downloads.client.sha1)) {
+                    if (!clientFile.exists() || !DownloadUtils.compareSHA1Cached(clientFile, minecraftVersionInfo.downloads.client.sha1)) {
                         clientFile.delete();
                         DownloadUtils.downloadFile(minecraftVersionInfo.downloads.client.url, clientFile);
                     }
 
                     // Check if the downloaded client matches the expected SHA1 hash
-                    if (DownloadUtils.compareSHA1(clientFile, minecraftVersionInfo.downloads.client.sha1)) {
+                    if (DownloadUtils.compareSHA1Cached(clientFile, minecraftVersionInfo.downloads.client.sha1)) {
                         Logger.getInstance().appendToLog("Client downloaded");
                         return clientFile.getAbsolutePath();
                     }
@@ -245,7 +245,7 @@ public class Installer {
                                 DownloadUtils.downloadFile(artifact.url, libraryFile, artifact.size);
                             }
                         }
-                        if (DownloadUtils.compareSHA1(libraryFile, sha1)) {
+                        if (DownloadUtils.compareSHA1Cached(libraryFile, sha1)) {
                             if (sha1CacheFile != null && sha1 != null) {
                                 try {
                                     FileUtils.writeStringToFile(sha1CacheFile, sha1, StandardCharsets.UTF_8);
@@ -348,7 +348,7 @@ public class Installer {
                 copyAssetIfMissing(activity, "sodium-options.json", new File(instance.gameDir, "config/sodium-options.json"));
                 copyAssetIfMissing(activity, "sodium-mixins.properties", new File(instance.gameDir, "config/sodium-mixins.properties"));
             }
-            FileUtils.writeByteArrayToFile(new File(Constants.USER_HOME + "/hacks/OshiAndroidShim.jar"), FileUtil.loadFromAssetToByte(activity, "hacks/OshiAndroidShim.jar"));
+            copyAssetIfDifferent(activity, "hacks/OshiAndroidShim.jar", new File(Constants.USER_HOME + "/hacks/OshiAndroidShim.jar"));
         } catch (IOException e) {
             e.printStackTrace();
         }
@@ -449,6 +449,23 @@ public class Installer {
         FileUtils.writeByteArrayToFile(target, FileUtil.loadFromAssetToByte(activity, asset));
     }
 
+    /** Keeps a bundled helper jar in sync with the APK without rewriting it every launch. */
+    private static void copyAssetIfDifferent(Activity activity, String asset, File target) throws IOException {
+        byte[] assetBytes = FileUtil.loadFromAssetToByte(activity, asset);
+        if (assetBytes == null) {
+            return;
+        }
+        if (target.isFile() && target.length() == assetBytes.length
+                && Arrays.equals(assetBytes, Files.readAllBytes(target.toPath()))) {
+            return;
+        }
+        File parent = target.getParentFile();
+        if (parent != null) {
+            parent.mkdirs();
+        }
+        FileUtils.writeByteArrayToFile(target, assetBytes);
+    }
+
     private static void refreshFabricLoaderForCurrentLaunch(Activity activity, MinecraftInstances.Instance instance) {
         File installedLoader = new File(FABRIC_LOADER_26_2_JAR);
         if(installedLoader.isFile()) {
@@ -456,12 +473,7 @@ public class Installer {
         }
 
         try {
-            FabricMeta.FabricVersion fabricVersion = FabricMeta.getVersion(FABRIC_LOADER_26_2);
-            if(fabricVersion == null) {
-                return;
-            }
-
-            VersionInfo fabricVersionInfo = FabricMeta.getVersionInfo(fabricVersion, instance.versionName);
+            VersionInfo fabricVersionInfo = FabricMeta.getVersionInfoCached(FABRIC_LOADER_26_2, instance.versionName);
             if(fabricVersionInfo == null) {
                 return;
             }

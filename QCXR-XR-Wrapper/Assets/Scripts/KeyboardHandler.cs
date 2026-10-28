@@ -56,16 +56,19 @@ public class KeyboardHandler : MonoBehaviour
     {
         if (searchBox.IsActive())
         {
-            searchBox.text = searchBox.text.Remove(searchBox.text.Length - 1, 1);
+            if (searchBox.text.Length > 0)
+                searchBox.text = searchBox.text.Remove(searchBox.text.Length - 1, 1);
             keyPop.Play();
         }
         else if (ramSetter.IsActive())
         {
-            ramSetter.text = ramSetter.text.Remove(ramSetter.text.Length - 1, 1);
+            if (ramSetter.text.Length > 0)
+                ramSetter.text = ramSetter.text.Remove(ramSetter.text.Length - 1, 1);
             keyPop.Play();
         } else if (instanceEditor.IsActive())
         {
-            instanceEditor.text = instanceEditor.text.Remove(instanceEditor.text.Length - 1, 1);
+            if (instanceEditor.text.Length > 0)
+                instanceEditor.text = instanceEditor.text.Remove(instanceEditor.text.Length - 1, 1);
             keyPop.Play();
         }
         else if (externalField != null && externalField.IsActive() && externalField.text.Length > 0)

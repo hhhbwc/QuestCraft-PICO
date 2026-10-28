@@ -83,4 +83,40 @@ public class DownloadUtils {
             return false;
         }
     }
+
+    /**
+     * Hashing the 40 MB client jar and hundreds of library jars cost about two
+     * seconds on every launch. A jar is only re-hashed when its size or mtime
+     * changed since the last successful verification.
+     */
+    public static boolean compareSHA1Cached(File f, @Nullable String sourceSHA) {
+        if (sourceSHA == null) {
+            return true;
+        }
+        File stamp = new File(f.getAbsolutePath() + ".verified");
+        long size = f.length();
+        long mtime = f.lastModified();
+        if (stamp.isFile()) {
+            try {
+                String cached = new String(Files.readAllBytes(stamp.toPath()), java.nio.charset.StandardCharsets.UTF_8).trim();
+                String[] parts = cached.split(" ");
+                if (parts.length == 3
+                        && parts[0].equalsIgnoreCase(sourceSHA)
+                        && parts[1].equals(Long.toString(size))
+                        && parts[2].equals(Long.toString(mtime))) {
+                    return true;
+                }
+            } catch (IOException ignored) {
+            }
+        }
+        if (!compareSHA1(f, sourceSHA)) {
+            return false;
+        }
+        try {
+            Files.write(stamp.toPath(),
+                    (sourceSHA + " " + size + " " + mtime).getBytes(java.nio.charset.StandardCharsets.UTF_8));
+        } catch (IOException ignored) {
+        }
+        return true;
+    }
 }

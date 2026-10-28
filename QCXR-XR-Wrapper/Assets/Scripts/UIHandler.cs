@@ -66,10 +66,15 @@ public class UIHandler : MonoBehaviour
         playButton.interactable = false;
     }
     
+    private string lastClock;
     void Update()
     {
         string time = DateTime.Now.ToString("hh:mm tt");
-        minuteHourText.text = time;
+        if (!string.Equals(time, lastClock))
+        {
+            lastClock = time;
+            minuteHourText.text = time;
+        }
         UILoginCheck();
     }
 

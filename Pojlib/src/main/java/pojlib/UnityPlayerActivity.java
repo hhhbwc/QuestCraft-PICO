@@ -110,6 +110,7 @@ public class UnityPlayerActivity extends ActivityGroup implements IUnityPlayerLi
         // Must be set before UnityPlayer starts, because C# Start() can run
         // before onCreate returns.
         API.autoLaunchInstance = getIntent().getStringExtra("qcxr_autolaunch");
+        API.extraGameArgs = getIntent().getStringExtra("qcxr_extraargs");
 
         requestWindowFeature(Window.FEATURE_NO_TITLE);
         super.onCreate(savedInstanceState);

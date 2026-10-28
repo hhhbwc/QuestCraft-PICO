@@ -31,8 +31,19 @@ Unity 启动器 + Pojlib（Java 启动链）+ Vivecraft OpenXR + MobileGlues GL 
 - **着色器转换三级缓存**：MC 进程内 → MobileGlues 磁盘缓存（跨启动）→ Adreno 驱动缓存；
   首次进世界约有 30 秒管线编译预热期（MC 26.3 管线惰性编译的固有行为），之后 10%–400%
   渲染分辨率档位下均无编译卡顿
-- **启动链优化**：mod 库 SHA1 本地缓存（跳过每库一次的网络往返）、资产索引快速路径、
-  六阶段启动耗时打点（见 launcher 日志 `prelaunch:` 行）
+- **启动链优化**：版本元数据与 Fabric Loader profile 落盘缓存（24h，离线可取用）、
+  库文件 SHA1 校验戳（大小/mtime 未变不再重算）、client/libraries/assets 三步并行；
+  实测 prelaunch 由 3.3–3.9 s 降到 0.16–0.22 s
+- **交接后启动器降频**：游戏首帧后把 Unity 渲染循环压到 5 fps 并暂停音频，避免后台空渲染
+  继续占用约 20% CPU；实测 26.2 每帧 CPU 8.6→7.6 ms、GPU 温度 90→75 °C
+
+### VR 画质默认值
+- Vivecraft `renderScaleFactor=1.1`（眼睛纹理 1504→1654）与 `doubleGUIResolution=true`
+  （VR 菜单/文字不再半分辨率），菜单跟随面部
+
+### 测试钩子（不设 intent 时完全惰性）
+- `am start ... --es qcxr_autolaunch 26.3`：跳过手动点击，自动走一遍 Play 流程
+- `am start ... --es qcxr_extraargs '--quickPlaySingleplayer|New World'`：附加游戏参数（`|` 分隔）
 
 ---
 

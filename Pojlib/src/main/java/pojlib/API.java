@@ -85,6 +85,11 @@ public class API {
      * intent. JNIStorage starts the normal Play flow when this is non-empty.
      */
     public static String autoLaunchInstance;
+    /**
+     * Test hook: extra game arguments passed as --es qcxr_extraargs, '|'
+     * separated so arguments may contain spaces. Empty in normal launches.
+     */
+    public static String extraGameArgs;
 
     public static String getAutoLaunchInstance() {
         return autoLaunchInstance;

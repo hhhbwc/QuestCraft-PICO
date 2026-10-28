@@ -3,7 +3,10 @@ package pojlib.install;
 import com.google.gson.annotations.SerializedName;
 import pojlib.APIHandler;
 import pojlib.util.Constants;
+import pojlib.util.GsonUtils;
 import pojlib.util.Version;
+
+import java.io.File;
 
 public class FabricMeta {
 
@@ -114,5 +117,35 @@ public class FabricMeta {
 
     public static VersionInfo getVersionInfo(FabricVersion fabricVersion, String minecraftVersion) {
         return handler.get(String.format("versions/loader/%s/%s/profile/json", minecraftVersion, fabricVersion.version), VersionInfo.class);
+    }
+
+    /**
+     * Launcher-side profile lookup that survives offline starts. Two network
+     * round-trips before every 26.2 launch were costing seconds on bad Wi-Fi, so
+     * a fresh profile is reused for a day and the cached one is the fallback.
+     */
+    public static VersionInfo getVersionInfoCached(String loaderVersion, String minecraftVersion) {
+        File cache = new File(Constants.USER_HOME,
+                "fabric-loader-" + loaderVersion + "-" + minecraftVersion + ".json");
+        long now = System.currentTimeMillis();
+        if (cache.isFile() && now - cache.lastModified() < 24L * 60 * 60 * 1000) {
+            VersionInfo cached = GsonUtils.jsonFileToObject(cache.getAbsolutePath(), VersionInfo.class);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        FabricVersion fabricVersion = getVersion(loaderVersion);
+        VersionInfo fresh = fabricVersion == null ? null : getVersionInfo(fabricVersion, minecraftVersion);
+        if (fresh != null) {
+            GsonUtils.objectToJsonFile(cache.getAbsolutePath(), fresh);
+            return fresh;
+        }
+        if (cache.isFile()) {
+            VersionInfo cached = GsonUtils.jsonFileToObject(cache.getAbsolutePath(), VersionInfo.class);
+            if (cached != null) {
+                return cached;
+            }
+        }
+        return null;
     }
 }

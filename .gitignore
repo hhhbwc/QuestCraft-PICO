@@ -49,6 +49,10 @@ local.properties
 # ---------- Logs / local output ----------
 logs/
 /out/
+# Local audit artifacts (device logs, screenshots, extracted APKs)
+/audit/
+# Built AAR is produced by build.ps1; do not commit it
+QCXR-XR-Wrapper/Assets/Plugins/Android/Pojlib-release.aar
 
 # ---------- Android build artifacts (generated) ----------
 *.apk
